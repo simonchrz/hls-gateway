@@ -1,0 +1,17 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - /mnt/tv:/mnt/tv:ro
+    environment:
+      - TZ=Europe/Berlin
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,85 @@
+{
+	# Use internal CA for LAN self-signed certs
+	local_certs
+	# Admin on localhost only
+	admin localhost:2019
+	# We don't own :80 (pi-hole has it) — disable the auto HTTP→HTTPS redirect
+	auto_https disable_redirects
+}
+
+# Main HTTPS site with HTTP/2 on port 8443
+raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
+	tls internal
+
+	encode zstd gzip
+
+	# Static HLS segments served directly from SSD (bypasses Flask)
+	@hls_ts path_regexp ^/hls/[^/]+/seg_[0-9]+\.ts$
+	handle @hls_ts {
+		root * /mnt/tv
+		file_server
+		header Content-Type "video/mp2t"
+		header Cache-Control "public, max-age=3600"
+		header Access-Control-Allow-Origin "*"
+	}
+
+	# Tvheadend imagecache (channel logos) — proxy so we avoid mixed content
+	handle /imagecache/* {
+		reverse_proxy localhost:9981
+		header Cache-Control "public, max-age=86400"
+	}
+
+	# Tvheadend recording playback (supports HTTP Range for seeking)
+	handle /dvrfile/* {
+		reverse_proxy localhost:9981
+	}
+
+	# go2rtc low-latency live endpoint (~1s first-load, no DVR)
+	# /live/<channel>.m3u8 → go2rtc master playlist
+	@live_m3u8 path_regexp ^/live/([^/]+)\.m3u8$
+	handle @live_m3u8 {
+		rewrite * /api/stream.m3u8?src={re.live_m3u8.1}
+		reverse_proxy localhost:1984
+	}
+	# go2rtc HLS subresources — client follows relative URLs from master
+	# which land at /live/hls/* and need to go to /api/hls/*
+	handle /live/hls/* {
+		uri replace /live/hls /api/hls
+		reverse_proxy localhost:1984
+	}
+
+	# WebSocket for WebRTC signaling — plain reverse_proxy handles
+	# WebSocket upgrade automatically. Force HTTP/1.1 upstream so go2rtc
+	# gets a proper Connection:Upgrade header.
+	handle /api/ws {
+		reverse_proxy localhost:1984
+	}
+	handle /api/webrtc* {
+		reverse_proxy localhost:1984
+	}
+	handle /video-rtc.js {
+		reverse_proxy localhost:1984
+	}
+	handle /video-stream.js {
+		reverse_proxy localhost:1984
+	}
+
+	# Everything else → Flask gateway
+	reverse_proxy localhost:8080 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+	}
+}
+
+# Plain HTTP :8444 → redirect to HTTPS (easy backup port)
+# optional — falls wir mal HTTP→HTTPS-Redirect wollen
+:8444 {
+	redir https://{host}:8443{uri} permanent
+}
