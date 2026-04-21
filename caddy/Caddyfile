@@ -34,36 +34,6 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 		reverse_proxy localhost:9981
 	}
 
-	# go2rtc low-latency live endpoint (~1s first-load, no DVR)
-	# /live/<channel>.m3u8 → go2rtc master playlist
-	@live_m3u8 path_regexp ^/live/([^/]+)\.m3u8$
-	handle @live_m3u8 {
-		rewrite * /api/stream.m3u8?src={re.live_m3u8.1}
-		reverse_proxy localhost:1984
-	}
-	# go2rtc HLS subresources — client follows relative URLs from master
-	# which land at /live/hls/* and need to go to /api/hls/*
-	handle /live/hls/* {
-		uri replace /live/hls /api/hls
-		reverse_proxy localhost:1984
-	}
-
-	# WebSocket for WebRTC signaling — plain reverse_proxy handles
-	# WebSocket upgrade automatically. Force HTTP/1.1 upstream so go2rtc
-	# gets a proper Connection:Upgrade header.
-	handle /api/ws {
-		reverse_proxy localhost:1984
-	}
-	handle /api/webrtc* {
-		reverse_proxy localhost:1984
-	}
-	handle /video-rtc.js {
-		reverse_proxy localhost:1984
-	}
-	handle /video-stream.js {
-		reverse_proxy localhost:1984
-	}
-
 	# Everything else → Flask gateway
 	reverse_proxy localhost:8080 {
 		header_up Host {host}
