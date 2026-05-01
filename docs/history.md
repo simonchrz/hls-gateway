@@ -17,15 +17,14 @@
   reverse-engineering more risks breakage on their next bundle push.
 - **Reverse-engineering arte's private OPA v3 API for past-show
   lookup.** Not publicly accessible. User opted to skip for now.
-- **ML model training** for ad detection — proposed as "Stufe 2/3" of
-  an ad-detection overhaul. Skipped because (a) the problem is Pi
-  CPU, not detection accuracy, and (b) the obvious label source
-  would be comskip's own output, capping the ML ceiling at comskip's
-  accuracy. An ML model on the Pi would replace one CPU load with
-  another (likely worse, no NPU/TPU on Pi5). If detection quality
-  ever becomes the issue, start with per-channel `comskip.ini`
-  tuning and ground-truth hand-labels — not a comskip-imitating
-  model.
+- ~~**ML model training** for ad detection~~ — UPDATE: this entry is
+  now obsolete. The Mac-offload path freed enough CPU that we DID
+  build the ML stack — `tv-detect` with backbone.onnx + linear
+  head.bin, nightly retrain via train-head.py, ads_user.json as
+  ground-truth label source. Per-Show IoU now reported on /learning.
+  The original concerns (a) Pi CPU bottleneck, (b) label source
+  capped at comskip — both addressed by running on Mac with user-
+  reviewed labels.
 - **Full stack migration to Mac** — considered 2026-04-21. Blockers
   that *do* apply: Docker Desktop's `network_mode: host` is gimped
   on macOS (all three stack containers use it, plus SAT>IP discovery
@@ -54,3 +53,31 @@
   behaviour (partially supported via LRU already)
 - Scene-based chapter marker tuning (would need arte.tv `scene[]`
   data which is editorially curated — absent for most shows)
+- **Whisper-Feature Stage 4 — full Go-side NN integration** (deferred
+  2026-05-01). Currently Whisper runs as daemon-side post-processor
+  with WHISPER_ENABLE=1 (rules in `tv-whisper-eval.py`, validated
+  +5.4% mean Block-IoU on n=9). Stage 4 would add `whisper-prob` as
+  a 6th NN-feature column (dim ≥5160, currently 5132 with logo+audio)
+  so the head learns optimal weight per frame instead of hand-coded
+  rule thresholds. Deferred reasons:
+    1. **N too small for new feature** (memory `feature_ceiling_n50`
+       puts the threshold at N≥150; we are at N=161, just barely).
+       Audio-RMS was added recently and we have no stable per-show
+       IoU yet to confirm it didn't already saturate the head.
+    2. **Architecture inversion**: NN-feature needs whisper BEFORE
+       detect (= input to inference), current post-processor runs
+       AFTER. Sequencing change adds ~50 s latency unless run in
+       parallel.
+    3. **Loss of pass-through-safety**: post-processor falls back
+       cleanly on any error; NN-feature is hard-wired and any broken
+       whisper.json would silently bias the head's frame predictions.
+    4. **Less interpretable**: post-processor logs which rule fired
+       (`−1fp, ⤇0ext, +0new`); NN-feature would be opaque.
+
+  Re-evaluate when: (a) corpus N ≥ 250-300, (b) post-processor's
+  +5.4% gain has plateaued (= rule-tuning yields no further IoU
+  gain over 2-3 weeks), (c) we have separated per-show IoU
+  before/after WHISPER_ENABLE so Stage 4's marginal effect is
+  measurable. Estimated effort if/when revived: 6-8h
+  (Go feature in `signals/`, train-head.py wiring, daemon CLI flag,
+  head retraining + smoke).
