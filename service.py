@@ -1601,7 +1601,15 @@ def hls_playlist(slug):
 
 @app.route("/hls/<slug>/dvr.m3u8")
 def hls_playlist_dvr(slug):
-    """Full 2h DVR playlist (untrimmed), for timeshift playback."""
+    """Full 2h DVR playlist (untrimmed), for timeshift playback.
+
+    Inserts `#EXT-X-PLAYLIST-TYPE:EVENT` right after the version tag.
+    Without it, AVPlayer/mpv/ffmpeg default to sliding-window semantics
+    and refuse to scrub back beyond the player buffer, even though all
+    segments are listed. EVENT marks the playlist as append-only — the
+    player allows scrubbing from playlist start to live edge. NOT VOD:
+    that would tell the player the stream has ended and stop live
+    tracking."""
     with cmap_lock:
         if slug not in channel_map:
             abort(404, "unknown channel")
@@ -1617,8 +1625,14 @@ def hls_playlist_dvr(slug):
         time.sleep(0.15)
     if not playlist_path.exists():
         abort(503, "stream not ready yet")
-    resp = send_from_directory(ch_dir, "index.m3u8",
-                                mimetype="application/vnd.apple.mpegurl")
+    content = playlist_path.read_text()
+    if "#EXT-X-PLAYLIST-TYPE" not in content:
+        # Insert right after the VERSION tag so the playlist-type is
+        # known before any media tags are parsed.
+        content = re.sub(r"(#EXT-X-VERSION:[0-9]+\s*\n)",
+                         r"\1#EXT-X-PLAYLIST-TYPE:EVENT\n",
+                         content, count=1)
+    resp = Response(content, mimetype="application/vnd.apple.mpegurl")
     resp.headers["Cache-Control"] = "no-cache"
     return _cors(resp)
 
