@@ -816,14 +816,18 @@ def _app_track(slug):
     one slug to another immediately stops the previous one (unless it
     has other consumers indicated by recent non-app activity, or is
     pinned ALWAYS_WARM). Tighter eviction than the shared warm pool
-    so the app never holds more than one tuner."""
+    so the app never holds more than one tuner.
+
+    Pass `slug=None` to release the current session without acquiring
+    a new one — used when the app switches to a tuner-free source
+    (mediathek-passthru for ARD/ZDF/etc)."""
     now = time.time()
     prev = None
     with _app_lock:
         if _app_session["slug"] and _app_session["slug"] != slug:
             prev = _app_session["slug"]
         _app_session["slug"] = slug
-        _app_session["last_seen"] = now
+        _app_session["last_seen"] = now if slug else 0.0
     if prev and prev not in ALWAYS_WARM:
         # Only stop if no fresh non-app activity in last 10s — covers
         # the case where the web UI is also watching the prev channel.
@@ -1621,31 +1625,44 @@ def hls_playlist_dvr(slug):
 
 @app.route("/api/app/live/<slug>/index.m3u8")
 def app_live_playlist(slug):
-    """Live HLS playlist for external app clients with single-tuner-
-    per-app cap. Switching channels stops the previous app channel
-    (unless an ALWAYS_WARM-pinned channel, or web UI is also actively
-    watching it). Idle eviction is APP_IDLE_TIMEOUT seconds (default
-    60s) — much shorter than the 180s shared-pool default so the
-    tuner is freed for DVR as soon as the app user walks away.
+    """Live HLS playlist for external app clients. Two routing modes:
+
+    1) Channel has a mediathek-passthru upstream (ARD, ZDF, 3sat,
+       Arte, KiKA, Tagesschau24): delegate to /mediathek-passthru/
+       so no tuner is held. The 6 public-broadcaster channels stream
+       directly from the broadcaster CDN — DVR keeps full tuner
+       capacity even while the app watches these.
+    2) Tuner-based channel: standard single-tuner-per-app behavior.
+       Switching channels stops the previous app channel (unless
+       ALWAYS_WARM-pinned or web UI is also actively watching it).
+       Idle eviction APP_IDLE_TIMEOUT (60s default).
 
     Web UI continues to use /hls/<slug>/index.m3u8 with shared warm-
     pool semantics. App should poll segments from the same URL prefix
-    the playlist references — segment URIs in the playlist are bare
-    filenames, AVPlayer/mpv resolve them relative to this manifest."""
+    the playlist references — bare filenames resolve relative to the
+    manifest URL."""
     with cmap_lock:
         if slug not in channel_map:
             abort(404, "unknown channel")
+    if slug in MEDIATHEK_LIVE:
+        _app_track(None)
+        return mediathek_passthru_master(slug)
     _app_track(slug)
     return hls_playlist(slug)
 
 
 @app.route("/api/app/live/<slug>/dvr.m3u8")
 def app_live_dvr(slug):
-    """DVR variant of /api/app/live/<slug>/index.m3u8 — full 2h
-    timeshift playlist with the same single-tuner-per-app cap."""
+    """DVR variant of /api/app/live/<slug>/index.m3u8. For mediathek-
+    backed channels the upstream restart window (2-3 h depending on
+    broadcaster) is used; for tuner-based channels the local 2 h
+    HLS-DVR buffer applies."""
     with cmap_lock:
         if slug not in channel_map:
             abort(404, "unknown channel")
+    if slug in MEDIATHEK_LIVE:
+        _app_track(None)
+        return mediathek_passthru_master(slug)
     _app_track(slug)
     return hls_playlist_dvr(slug)
 
@@ -8036,11 +8053,18 @@ def api_channels():
                     "poster_url": _show_poster_url("", title),
                 }
                 break
+        # Mediathek-passthru wins for the 6 public broadcasters — same
+        # app_live_url, but internally the gateway routes to the CDN
+        # instead of spinning up a tuner. Surfaces `via` so the app can
+        # render a "via Mediathek" badge if desired, and
+        # `mediathek_window` (= upstream restart depth in seconds) so
+        # the app can advertise longer scrub-back than the local 2 h.
+        mt = MEDIATHEK_LIVE.get(slug)
         out.append({
             "slug": slug,
             "name": info["name"],
             "icon": icon,
-            "is_warm": slug in warm_slugs,
+            "is_warm": (slug in warm_slugs) or bool(mt),
             "live_url": f"{host}/hls/{slug}/index.m3u8",
             "dvr_url": f"{host}/hls/{slug}/dvr.m3u8",
             # App-scoped endpoints — single-tuner cap + tighter idle
@@ -8048,6 +8072,8 @@ def api_channels():
             "app_live_url": f"{host}/api/app/live/{slug}/index.m3u8",
             "app_dvr_url": f"{host}/api/app/live/{slug}/dvr.m3u8",
             "ads_stream_url": f"{host}/api/live-ads-stream/{slug}",
+            "via": "mediathek" if mt else "tuner",
+            "mediathek_window": (mt[1] if mt else 0),
             "current": current,
         })
 
