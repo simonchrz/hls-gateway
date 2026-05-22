@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Timestamped backups (auto-created during scp-deploy workflow)
+*.bak
+*.bak.*
+
+# Binary runtime artifacts (built externally, ship via release/setup script)
+tv-detect
+libonnxruntime.so*
+libonnxruntime_providers_shared.so
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime state (recreated by service)
+state-backup/*
+!state-backup/.gitkeep

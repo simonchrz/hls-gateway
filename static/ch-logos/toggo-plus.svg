@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   xmlns:dc="http://purl.org/dc/elements/1.1/"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   width="300"
+   height="102.1978"
+   viewBox="0 0 300 102.1978"
+   version="1.1"
+   id="svg12"
+   sodipodi:docname="Toggo Logo 10.2019.svg"
+   inkscape:version="0.92.1 r15371">
+  <metadata
+     id="metadata16">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <sodipodi:namedview
+     pagecolor="#ffffff"
+     bordercolor="#666666"
+     borderopacity="1"
+     objecttolerance="10"
+     gridtolerance="10"
+     guidetolerance="10"
+     inkscape:pageopacity="0"
+     inkscape:pageshadow="2"
+     inkscape:window-width="1376"
+     inkscape:window-height="991"
+     id="namedview14"
+     showgrid="false"
+     fit-margin-top="0"
+     fit-margin-left="0"
+     fit-margin-right="0"
+     fit-margin-bottom="0"
+     inkscape:zoom="3.4120708"
+     inkscape:cx="80.862478"
+     inkscape:cy="12.93143"
+     inkscape:window-x="-8"
+     inkscape:window-y="0"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="svg12" />
+  <defs
+     id="defs3">
+    <path
+       id="a"
+       d="M 0,0 H 182 V 101 H 0 Z"
+       inkscape:connector-curvature="0" />
+  </defs>
+  <path
+     style="fill:#ec6400;fill-opacity:1;fill-rule:evenodd;stroke-width:1.64835167"
+     inkscape:connector-curvature="0"
+     id="path8"
+     mask="none"
+     d="m 264.02473,68.319232 c -11.07693,0 -20.05385,-8.983518 -20.05385,-20.060441 0,-11.08022 8.97857,-20.062088 20.05385,-20.062088 11.07527,0 20.05384,8.981868 20.05384,20.06044 0,11.080219 -8.97857,20.060439 -20.05384,20.060439 z m -172.64011,0 c -11.07693,0 -20.05385,-8.983518 -20.05385,-20.060441 0,-11.08022 8.97857,-20.062088 20.05385,-20.062088 11.07527,0 20.05384,8.981868 20.05384,20.06044 0,11.080219 -8.97857,20.060439 -20.05384,20.060439 z M 264.07088,12.173077 c -19.84286,0 -35.92912,16.091209 -35.92912,35.942307 0,0.474726 0.0165,0.946154 0.0363,1.417583 H 204.6989 v 14.444505 h 18.84396 c -3.17638,6.88517 -10.13572,11.66703 -18.21429,11.66703 -11.07527,0 -20.0522,-8.98351 -20.0522,-20.060436 0,-11.08022 8.97693,-20.062088 20.05385,-20.062088 3.38407,0 6.57033,0.840659 9.36758,2.324176 l 11.6044,-11.610989 c -6.09485,-4.388395 -13.41714,-6.745528 -20.92747,-6.736814 -9.5356,-0.01203 -18.68219,3.779691 -25.41264,10.534616 h -31.35495 v 14.444505 h 18.84231 c -3.17637,6.886814 -10.13407,11.667033 -18.21264,11.667033 -11.07527,0 -20.05384,-8.980219 -20.05384,-20.060439 0,-11.08022 8.97857,-20.06044 20.05384,-20.06044 6.18297,0 11.71154,2.802198 15.39066,7.203297 L 175.96813,11.87967 C 169.39451,4.585714 159.87363,0 149.28297,0 134.36868,0 121.57747,9.092307 116.14286,22.038461 109.614,15.828518 100.98273,12.3102 91.97308,12.186264 v -0.01319 H 91.43407 0 V 28.084612 H 23.620879 V 48.25714 c 0,22.005502 10.481868,41.554952 26.71978,53.94066 L 61.747253,90.787912 C 48.32967,81.403842 39.537363,65.840112 39.537363,48.257143 V 28.084615 h 22.058241 c -3.982814,5.920091 -6.104981,12.895632 -6.093956,20.030769 0,19.851098 16.086262,35.943958 35.929122,35.943958 14.91428,0 27.70549,-9.09396 33.14011,-22.040111 6.66316,6.342511 15.5129,9.875441 24.71209,9.865381 8.02088,0 15.42527,-2.63077 21.40384,-7.073074 4.12088,15.304944 18.08572,26.571424 34.68792,26.571424 13.86263,0 25.88406,-7.85769 31.87582,-19.35989 6.58022,7.38297 16.15385,12.03627 26.81868,12.03627 C 283.91538,84.059342 300,67.966482 300,48.115384 300,28.264286 283.91374,12.173077 264.07088,12.173077 Z"
+     sodipodi:nodetypes="cssscccsssccssccccssscccccccsssccscccccccsccscccscccscsss" />
+</svg>

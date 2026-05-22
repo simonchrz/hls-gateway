@@ -1,0 +1,47 @@
+services:
+  hls-gateway:
+    build: .
+    image: hls-gateway:local
+    container_name: hls-gateway
+    user: "1000:1000"
+    restart: unless-stopped
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    volumes:
+      - /mnt/tv/hls:/data/hls
+      - ./service.py:/app/service.py:ro
+      - ./static:/app/static:ro
+      - ./state-backup:/state-backup
+      - /mnt/tv:/recordings
+      - ./tv-detect:/usr/local/bin/tv-detect:ro
+      - ./libonnxruntime.so.1.25.0:/usr/lib/aarch64-linux-gnu/libonnxruntime.so:ro
+    environment:
+      - TVH_BASE=http://raspberrypi5lan:9981
+      - HOST_URL=https://raspberrypi5lan:8443
+      - IDLE_TIMEOUT=30
+      - FAV_TAG_UUID=ed43d130b6d7f8e56b063db6de8d2b06
+      - ALWAYS_WARM=
+      - TZ=Europe/Berlin
+      # Live-buffer comskip is offloaded to the Mac (mac/tv-live-comskip.py
+      # in this repo). The script writes /mnt/tv/hls/.live_ads.json
+      # directly; our internal _live_adskip_loop goes dormant and
+      # /api/live-ads/<slug> re-reads the JSON each call. Earlier
+      # naive port saturated the USB-2 link to the SSD (re-pulled
+      # 900 MB per scan over SMB) and tripped ext4 shutdown. The
+      # current script reads segments via Caddy on :8443 (file_server
+      # bypass of Flask) with a local segment cache, so each scan
+      # transfers ~15 MB after warmup instead of 900 MB.
+      - LIVE_ADS_OFFLOAD=mac
+      - THUMBS_OFFLOAD=mac
+      - HLS_OFFLOAD=mac
+      - DETECT_OFFLOAD=mac
+      - DETECT_FALLBACK_S=300
+      - HLS_FALLBACK_S=600
+      # Optional: TMDB v4 Bearer token for recordings-page EPG
+      # enrichment (poster + rating). Picked up from .env next to
+      # this file; falls back to TVmaze when unset.
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
