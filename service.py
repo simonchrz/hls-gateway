@@ -1650,6 +1650,34 @@ def app_live_dvr(slug):
     return hls_playlist_dvr(slug)
 
 
+@app.route("/api/app/live/<slug>/<filename>")
+def app_live_segment(slug, filename):
+    """Segment + nested-playlist passthrough for the app-scoped live
+    endpoint. AVPlayer/mpv resolve `seg_NNNNNN.ts` from the manifest
+    relative to the manifest's URL — they land here instead of under
+    /hls/<slug>/. We serve the same bytes from the shared HLS_DIR/<slug>
+    directory and update the warm-pool last_seen so the channel stays
+    alive while the app polls."""
+    with cmap_lock:
+        if slug not in channel_map:
+            abort(404)
+    if not (filename.endswith(".ts") or filename.endswith(".m3u8")):
+        abort(404)
+    fp = HLS_DIR / slug / filename
+    if not fp.is_file():
+        abort(404)
+    with active_lock:
+        if slug in channels:
+            channels[slug]["last_seen"] = time.time()
+    with _app_lock:
+        if _app_session.get("slug") == slug:
+            _app_session["last_seen"] = time.time()
+    mime = "video/mp2t" if filename.endswith(".ts") \
+           else "application/vnd.apple.mpegurl"
+    return _cors(send_from_directory(HLS_DIR / slug, filename,
+                                      mimetype=mime))
+
+
 @app.route("/hls/<slug>/<filename>")
 def hls_segment(slug, filename):
     with cmap_lock:
