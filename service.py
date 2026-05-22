@@ -104,6 +104,14 @@ HOST_URL       = os.environ.get("HOST_URL", "http://raspberrypi5lan:8080")
 IDLE_TIMEOUT   = int(os.environ.get("IDLE_TIMEOUT", "120"))
 MAX_WARM_STREAMS = int(os.environ.get("MAX_WARM_STREAMS", "3"))
 WARM_TTL_SECONDS = int(os.environ.get("WARM_TTL_SECONDS", "180"))
+# Idle-timeout for external-app live sessions (/api/app/live/<slug>/*).
+# Tighter than WARM_TTL because apps are user-attended single-stream
+# consumers — when AVPlayer stops polling for >APP_IDLE_TIMEOUT, free
+# the tuner immediately so DVR can claim it. The app naturally caps
+# itself to ONE concurrent channel because AVPlayer plays one stream.
+APP_IDLE_TIMEOUT = int(os.environ.get("APP_IDLE_TIMEOUT", "60"))
+_app_session = {"slug": None, "last_seen": 0.0}
+_app_lock = threading.Lock()
 # Watched recordings older than this get auto-deleted by the cleanup
 # loop. tvheadend's `watched` field is read-only/computed; the user-
 # settable proxy is `playcount` (>0 means watched). Player auto-marks
@@ -801,6 +809,61 @@ def ensure_running(slug):
     for v in victims:
         print(f"[{v}] LRU-evicted to free tuner for {slug}", flush=True)
         stop_channel(v)
+
+
+def _app_track(slug):
+    """Mark `slug` as the active external-app session. Switching from
+    one slug to another immediately stops the previous one (unless it
+    has other consumers indicated by recent non-app activity, or is
+    pinned ALWAYS_WARM). Tighter eviction than the shared warm pool
+    so the app never holds more than one tuner."""
+    now = time.time()
+    prev = None
+    with _app_lock:
+        if _app_session["slug"] and _app_session["slug"] != slug:
+            prev = _app_session["slug"]
+        _app_session["slug"] = slug
+        _app_session["last_seen"] = now
+    if prev and prev not in ALWAYS_WARM:
+        # Only stop if no fresh non-app activity in last 10s — covers
+        # the case where the web UI is also watching the prev channel.
+        with active_lock:
+            info = channels.get(prev)
+            recent = (info and now - info.get("last_seen", 0) < 10)
+        if not recent:
+            print(f"[app] switched {prev} → {slug}, stopping prev",
+                  flush=True)
+            stop_channel(prev)
+
+
+def _app_idle_loop():
+    """Stop the active app channel after APP_IDLE_TIMEOUT seconds of
+    no segment activity. Frees the tuner aggressively (60s default vs
+    the 180s general WARM_TTL) so DVR can claim it as soon as the app
+    user walks away."""
+    while True:
+        time.sleep(15)
+        try:
+            with _app_lock:
+                slug = _app_session["slug"]
+            if not slug:
+                continue
+            with active_lock:
+                info = channels.get(slug)
+            last_seen = info["last_seen"] if info else 0
+            if not last_seen:
+                with _app_lock:
+                    _app_session["slug"] = None
+                continue
+            if time.time() - last_seen > APP_IDLE_TIMEOUT:
+                if slug not in ALWAYS_WARM:
+                    print(f"[app] idle TTL {APP_IDLE_TIMEOUT}s expired "
+                          f"for {slug}", flush=True)
+                    stop_channel(slug)
+                with _app_lock:
+                    _app_session["slug"] = None
+        except Exception as e:
+            print(f"[app] idle-loop error: {e}", flush=True)
 
 
 def idle_killer_loop():
@@ -1554,6 +1617,37 @@ def hls_playlist_dvr(slug):
                                 mimetype="application/vnd.apple.mpegurl")
     resp.headers["Cache-Control"] = "no-cache"
     return _cors(resp)
+
+
+@app.route("/api/app/live/<slug>/index.m3u8")
+def app_live_playlist(slug):
+    """Live HLS playlist for external app clients with single-tuner-
+    per-app cap. Switching channels stops the previous app channel
+    (unless an ALWAYS_WARM-pinned channel, or web UI is also actively
+    watching it). Idle eviction is APP_IDLE_TIMEOUT seconds (default
+    60s) — much shorter than the 180s shared-pool default so the
+    tuner is freed for DVR as soon as the app user walks away.
+
+    Web UI continues to use /hls/<slug>/index.m3u8 with shared warm-
+    pool semantics. App should poll segments from the same URL prefix
+    the playlist references — segment URIs in the playlist are bare
+    filenames, AVPlayer/mpv resolve them relative to this manifest."""
+    with cmap_lock:
+        if slug not in channel_map:
+            abort(404, "unknown channel")
+    _app_track(slug)
+    return hls_playlist(slug)
+
+
+@app.route("/api/app/live/<slug>/dvr.m3u8")
+def app_live_dvr(slug):
+    """DVR variant of /api/app/live/<slug>/index.m3u8 — full 2h
+    timeshift playlist with the same single-tuner-per-app cap."""
+    with cmap_lock:
+        if slug not in channel_map:
+            abort(404, "unknown channel")
+    _app_track(slug)
+    return hls_playlist_dvr(slug)
 
 
 @app.route("/hls/<slug>/<filename>")
@@ -7765,24 +7859,38 @@ def api_events(slug):
 
 @app.route("/api/now/<slug>")
 def api_now(slug):
-    """What is currently on this channel (from EPG archive + live EPG)."""
+    """Current EPG show for this channel + show-poster. Backward-compat
+    keeps `time` (HH:MM-HH:MM) for the existing Watch-player UI; adds
+    `subtitle`, `start`, `stop`, `poster_url` for the iOS app's live-
+    tile refresh."""
     with cmap_lock:
         info = channel_map.get(slug)
+    empty = {"title": None, "subtitle": "", "start": 0, "stop": 0,
+             "time": "", "poster_url": ""}
     if not info:
-        return {"title": None, "time": ""}
+        return _cors(Response(json.dumps(empty),
+                              mimetype="application/json"))
     now_ts = int(time.time())
     try:
         data = fetch_epg(window_before=0, window_after=300)
         for e in data["events"].get(slug, []):
             if e["start"] <= now_ts < e["stop"]:
-                return {"title": e.get("title", ""),
-                        "time": time.strftime("%H:%M",
-                                               time.localtime(e["start"])) + "–" +
-                                time.strftime("%H:%M",
-                                               time.localtime(e["stop"]))}
+                title = (e.get("title") or "").strip()
+                tm = (time.strftime("%H:%M", time.localtime(e["start"])) +
+                      "–" +
+                      time.strftime("%H:%M", time.localtime(e["stop"])))
+                return _cors(Response(json.dumps({
+                    "title": title,
+                    "subtitle": (e.get("subtitle") or "").strip(),
+                    "start": e["start"],
+                    "stop": e["stop"],
+                    "time": tm,
+                    "poster_url": _show_poster_url("", title),
+                }), mimetype="application/json"))
     except Exception:
         pass
-    return {"title": None, "time": ""}
+    return _cors(Response(json.dumps(empty),
+                          mimetype="application/json"))
 
 
 @app.route("/api/recording-window/<slug>")
@@ -7850,15 +7958,24 @@ def api_recording_window(slug):
 
 @app.route("/api/channels")
 def api_channels():
-    """Ordered channel list as JSON for the Watch-player (swipe navigation)."""
-    now = time.time()
+    """Live-TV channel listing for external apps + the Watch-player
+    swipe navigation. Sorted by recent watch time (most-used first).
+    Each channel includes the curated PNG icon (iOS UIImage-friendly),
+    current EPG show with show-poster, live + DVR HLS URLs, and the
+    is_warm flag (= ffmpeg producing segments right now, instant
+    playback ≤ 1s; cold channels need ~5-10s spin-up).
+
+    Response: {channels: [...], n: N, warm_used: K, warm_max: M,
+               server_time: <unix_ts>} — CORS-enabled."""
+    now_ts = int(time.time())
     with stats_lock:
         st_snap = {s: dict(v) for s, v in stats.items()}
     with active_lock:
+        warm_slugs = set(channels.keys())
         for s, i in channels.items():
             st_snap.setdefault(s, {"watch_seconds": 0, "starts": 0})
             st_snap[s]["watch_seconds"] = st_snap[s].get("watch_seconds", 0) \
-                                           + (now - i.get("started_at", now))
+                                           + (now_ts - i.get("started_at", now_ts))
     with cmap_lock:
         items = list(channel_map.items())
     items.sort(key=lambda kv: (
@@ -7866,10 +7983,52 @@ def api_channels():
         -st_snap.get(kv[0], {}).get("starts", 0),
         kv[1]["name"].lower(),
     ))
-    return {"channels": [{"slug": s,
-                          "name": info["name"],
-                          "icon": _channel_logo_url(s, info.get("icon", ""))}
-                         for s, info in items]}
+
+    # One EPG lookup for all channels — saves ~24× tvh roundtrips.
+    try:
+        epg = fetch_epg(window_before=0, window_after=300)
+        epg_events = epg.get("events", {}) if isinstance(epg, dict) else {}
+    except Exception:
+        epg_events = {}
+
+    host = HOST_URL.rstrip("/")
+    out = []
+    for slug, info in items:
+        icon = _channel_logo_url(slug, info.get("icon", ""),
+                                 ext_priority=("png", "svg", "jpg"))
+        current = None
+        for e in epg_events.get(slug, []):
+            if e["start"] <= now_ts < e["stop"]:
+                title = (e.get("title") or "").strip()
+                current = {
+                    "title": title,
+                    "subtitle": (e.get("subtitle") or "").strip(),
+                    "start": e["start"],
+                    "stop": e["stop"],
+                    "poster_url": _show_poster_url("", title),
+                }
+                break
+        out.append({
+            "slug": slug,
+            "name": info["name"],
+            "icon": icon,
+            "is_warm": slug in warm_slugs,
+            "live_url": f"{host}/hls/{slug}/index.m3u8",
+            "dvr_url": f"{host}/hls/{slug}/dvr.m3u8",
+            # App-scoped endpoints — single-tuner cap + tighter idle
+            # eviction so DVR isn't blocked by lingering app sessions.
+            "app_live_url": f"{host}/api/app/live/{slug}/index.m3u8",
+            "app_dvr_url": f"{host}/api/app/live/{slug}/dvr.m3u8",
+            "ads_stream_url": f"{host}/api/live-ads-stream/{slug}",
+            "current": current,
+        })
+
+    return _cors(Response(
+        json.dumps({"channels": out, "n": len(out),
+                    "warm_used": len(warm_slugs),
+                    "warm_max": MAX_WARM_STREAMS,
+                    "server_time": now_ts}),
+        mimetype="application/json"))
 
 
 @app.route("/api/internal/scheduled-events")
@@ -21187,6 +21346,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGHUP, _sighup_reload)
     threading.Thread(target=_file_watcher_loop, daemon=True).start()
     threading.Thread(target=idle_killer_loop, daemon=True).start()
+    threading.Thread(target=_app_idle_loop, daemon=True).start()
     threading.Thread(target=prewarm_codecs, daemon=True).start()
     threading.Thread(target=epg_snapshot_loop, daemon=True).start()
     threading.Thread(target=_rec_prewarm_loop, daemon=True).start()
