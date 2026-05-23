@@ -12868,7 +12868,17 @@ def recording_source(uuid):
     Mac-side thumbs daemon (and potentially future offload paths).
     Range support via send_file conditional=True so ffmpeg can
     seek when needed. Sequential reads typically saturate gigabit
-    (~110 MB/s) vs SMB's ~40 MB/s — 2-3× speedup on Mac decode."""
+    (~110 MB/s) vs SMB's ~40 MB/s - 2-3x speedup on Mac decode.
+
+    Guards against in-progress recordings: serving partial bytes
+    while tvh is still writing the .ts is the root of the back-
+    half-NaN-logo bug - Mac caches the truncated copy and the
+    Content-Length check on the daemon side has no signal to
+    reject it (length matches what was actually on disk). Return
+    425 Too Early; the daemon treats that as transient and retries
+    after a cooldown."""
+    if _is_recording_in_progress(uuid):
+        abort(425)
     src = _rec_source_path(uuid)
     if not src or not Path(src).exists():
         abort(404)
