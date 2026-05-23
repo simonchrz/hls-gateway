@@ -231,23 +231,68 @@ class _MediathekUpstreamPool:
             return http.client.HTTPSConnection(host, port, timeout=timeout)
         return http.client.HTTPConnection(host, port, timeout=timeout)
 
+    def _pool_alive_check(self, conn):
+        """Quick liveness test for a rented keep-alive connection. Returns
+        True if the underlying socket appears alive, False if the server
+        has closed it. ~10us syscall — cheap enough to do on every rent.
+
+        Method: non-blocking MSG_PEEK of 1 byte. EAGAIN/BlockingIOError =
+        socket idle and alive. b'' return = server sent FIN, socket is dead.
+        Any OS error = socket is broken. Other data = unexpected pipelining,
+        treat as broken (caller will get fresh).
+        """
+        import socket as _socket
+        sock = getattr(conn, "sock", None)
+        if sock is None:
+            return False
+        try:
+            sock.setblocking(False)
+            try:
+                data = sock.recv(1, _socket.MSG_PEEK)
+            except (BlockingIOError, InterruptedError):
+                return True  # EAGAIN — socket idle, healthy
+            except (OSError, ConnectionError):
+                return False
+            finally:
+                sock.setblocking(True)
+            # data == b'' means server closed (FIN received).
+            # any unexpected bytes mean weird pipeline state, treat as bad.
+            return bool(data)
+        except Exception:
+            return False
+
     def urlopen(self, url, timeout=8, headers=None):
         """GET url, reusing an existing keep-alive connection if any.
         Returns body bytes. Raises on non-2xx or transport error.
+
+        Robustness (Step-7a): liveness-check on rent + retry-once on
+        connection-reset errors for reused conns.
         """
+        import http.client as _httpc
         parsed = urllib.parse.urlparse(url)
         key = self._key(parsed)
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
 
-        with self._lock:
-            bucket = self._pools.get(key)
-            conn = bucket.pop() if bucket else None
-
-        is_reused = conn is not None
-        if conn is None:
-            conn = self._new(key, timeout)
+        # Rent a live connection, or open new
+        conn = None
+        is_reused = False
+        while True:
+            with self._lock:
+                bucket = self._pools.get(key)
+                candidate = bucket.pop() if bucket else None
+            if candidate is None:
+                conn = self._new(key, timeout)
+                is_reused = False
+                break
+            if self._pool_alive_check(candidate):
+                conn = candidate
+                is_reused = True
+                break
+            # dead rented conn — discard, try next
+            try: candidate.close()
+            except Exception: pass
 
         req_headers = {
             "Host": parsed.hostname,
@@ -258,32 +303,51 @@ class _MediathekUpstreamPool:
         if headers:
             req_headers.update(headers)
 
-        try:
-            conn.request("GET", path, headers=req_headers)
-            resp = conn.getresponse()
-            body = resp.read()
-            status = resp.status
-            keep = (status < 500
-                    and resp.getheader("Connection", "").lower() != "close")
-            if keep:
+        retry_eligible_excs = (
+            _httpc.RemoteDisconnected, _httpc.BadStatusLine,
+            BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+        )
+
+        attempt = 0
+        while True:
+            try:
+                conn.request("GET", path, headers=req_headers)
+                resp = conn.getresponse()
+                body = resp.read()
+                status = resp.status
+                keep = (status < 500
+                        and resp.getheader("Connection", "").lower() != "close")
+                if keep:
+                    with self._lock:
+                        bucket = self._pools.setdefault(key, [])
+                        if len(bucket) < self.MAX_PER_HOST:
+                            bucket.append(conn)
+                        else:
+                            conn.close()
+                else:
+                    conn.close()
                 with self._lock:
-                    bucket = self._pools.setdefault(key, [])
-                    if len(bucket) < self.MAX_PER_HOST:
-                        bucket.append(conn)
-                    else:
-                        conn.close()
-            else:
-                conn.close()
-            with self._lock:
-                if is_reused: self._hits += 1
-                else: self._misses += 1
-            if status < 200 or status >= 300:
-                raise IOError(f"{url}: HTTP {status}")
-            return body
-        except Exception:
-            try: conn.close()
-            except Exception: pass
-            raise
+                    if is_reused: self._hits += 1
+                    else: self._misses += 1
+                if status < 200 or status >= 300:
+                    raise IOError(f"{url}: HTTP {status}")
+                return body
+            except retry_eligible_excs as e:
+                try: conn.close()
+                except Exception: pass
+                if attempt == 0 and is_reused:
+                    # The peek said alive but server tore down between peek
+                    # and request. Open fresh and try once more — this is
+                    # the user-visible 502 we observed in step-4 curl-sim.
+                    attempt += 1
+                    conn = self._new(key, timeout)
+                    is_reused = False
+                    continue
+                raise
+            except Exception:
+                try: conn.close()
+                except Exception: pass
+                raise
 
     def stats(self):
         with self._lock:
