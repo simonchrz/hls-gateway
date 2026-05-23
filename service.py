@@ -8070,8 +8070,17 @@ def mediathek_passthru_variant(slug):
             out_lines.append(base + stripped)
         else:
             out_lines.append(line)
-    return Response("\n".join(out_lines) + "\n",
-                     mimetype="application/vnd.apple.mpegurl")
+    out = "\n".join(out_lines) + "\n"
+    # Inject EXT-X-PLAYLIST-TYPE:EVENT if upstream omits it. Akamai-served
+    # mediathek manifests have a DVR window of segments but no PLAYLIST-TYPE
+    # tag, so AVPlayer/mpv treat them as pure-live and snap any seek back to
+    # the live edge — breaking the app's scrub-back gesture (2026-05-23).
+    # Same mechanism as hls_playlist_dvr above for tuner channels.
+    if "#EXT-X-PLAYLIST-TYPE" not in out:
+        out = re.sub(r"(#EXT-X-VERSION:[0-9]+\s*\n)",
+                     r"\1#EXT-X-PLAYLIST-TYPE:EVENT\n",
+                     out, count=1)
+    return Response(out, mimetype="application/vnd.apple.mpegurl")
 
 
 def _parse_master(master_url, master_text):
