@@ -1884,6 +1884,18 @@ def fetch_epg(window_before=900, window_after=6 * 3600, force=False):
     return out
 
 
+@app.route("/api/epg.json")
+def api_epg_json():
+    try:
+        hours_back = max(0, min(48, int(request.args.get("back", "1"))))
+        hours_fwd  = max(1, min(48, int(request.args.get("fwd",  "12"))))
+    except ValueError:
+        hours_back, hours_fwd = 1, 12
+    data = fetch_epg(window_before=hours_back * 3600,
+                     window_after=hours_fwd * 3600)
+    return Response(json.dumps(data), mimetype="application/json")
+
+
 @app.route("/epg")
 def epg_grid():
     # Widen window: from 12h ago to 18h ahead — covers "today + tomorrow"
