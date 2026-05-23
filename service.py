@@ -199,6 +199,232 @@ def _no_cache_dynamic(resp):
     return resp
 
 
+import http.client
+
+class _MediathekUpstreamPool:
+    """Per-host HTTP/1.1 keep-alive pool for mediathek-passthru upstream
+    GETs. Saves the TLS handshake on each subsequent call to the same
+    Akamai/ARD CDN host — the dominant cost on a Mediathek cold-tap.
+
+    Thread-safe via a single lock around dict mutations. Connections are
+    rented (= removed from the pool) before each request and returned on
+    clean response. On any exception the connection is dropped, not
+    returned, so a broken socket doesn't poison subsequent calls.
+
+    Cap at MAX_PER_HOST per host to bound memory + avoid CDN throttling.
+    """
+    MAX_PER_HOST = 4
+
+    def __init__(self):
+        self._pools = {}   # (host, port, scheme) -> list[HTTPConnection]
+        self._lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
+
+    def _key(self, parsed):
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return (parsed.hostname, port, parsed.scheme)
+
+    def _new(self, key, timeout):
+        host, port, scheme = key
+        if scheme == "https":
+            return http.client.HTTPSConnection(host, port, timeout=timeout)
+        return http.client.HTTPConnection(host, port, timeout=timeout)
+
+    def urlopen(self, url, timeout=8, headers=None):
+        """GET url, reusing an existing keep-alive connection if any.
+        Returns body bytes. Raises on non-2xx or transport error.
+        """
+        parsed = urllib.parse.urlparse(url)
+        key = self._key(parsed)
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+
+        with self._lock:
+            bucket = self._pools.get(key)
+            conn = bucket.pop() if bucket else None
+
+        is_reused = conn is not None
+        if conn is None:
+            conn = self._new(key, timeout)
+
+        req_headers = {
+            "Host": parsed.hostname,
+            "Connection": "keep-alive",
+            "Accept": "*/*",
+            "User-Agent": "hls-gateway/mediathek-passthru",
+        }
+        if headers:
+            req_headers.update(headers)
+
+        try:
+            conn.request("GET", path, headers=req_headers)
+            resp = conn.getresponse()
+            body = resp.read()
+            status = resp.status
+            keep = (status < 500
+                    and resp.getheader("Connection", "").lower() != "close")
+            if keep:
+                with self._lock:
+                    bucket = self._pools.setdefault(key, [])
+                    if len(bucket) < self.MAX_PER_HOST:
+                        bucket.append(conn)
+                    else:
+                        conn.close()
+            else:
+                conn.close()
+            with self._lock:
+                if is_reused: self._hits += 1
+                else: self._misses += 1
+            if status < 200 or status >= 300:
+                raise IOError(f"{url}: HTTP {status}")
+            return body
+        except Exception:
+            try: conn.close()
+            except Exception: pass
+            raise
+
+    def stats(self):
+        with self._lock:
+            return {"hits": self._hits, "misses": self._misses,
+                    "hosts": {f"{k[0]}:{k[1]}": len(v)
+                              for k, v in self._pools.items()}}
+
+_mediathek_upstream_pool = _MediathekUpstreamPool()
+
+
+class _MediathekManifestCache:
+    """LRU+TTL cache for Mediathek upstream manifest bodies (= the actual
+    response from Akamai/ARD CDN, NOT our rewritten proxy version). Each
+    entry is keyed by upstream URL.
+
+    Two TTLs:
+      MASTER_TTL  = 30s    — master.m3u8 only lists variants, very stable
+      VARIANT_TTL = 1.5s   — sub-playlist updates each ~2s TARGETDURATION;
+                              keep just under that to avoid serving stale
+
+    Speculative variant prefetch: on master cache-miss, the freshly-fetched
+    master.m3u8 is parsed via the existing _parse_master() and the picked
+    video+audio variant URLs are submitted to a small background pool.
+    By the time mpv requests them (~50ms later), they're cached. This is
+    the structural fix for split-stream channels (ZDF/ARD) where mpv would
+    otherwise sequentially fetch master → video-variant → audio-variant.
+    """
+
+    MASTER_TTL = 30.0
+    VARIANT_TTL = 1.5
+    MAX_ENTRIES = 64
+
+    def __init__(self):
+        import collections
+        self._lock = threading.Lock()
+        self._cache = collections.OrderedDict()  # url -> (expires_at, body)
+        # Small pool — 4 threads handle parallel video+audio variant fetches
+        # for 2 simultaneous master fetches comfortably.
+        from concurrent.futures import ThreadPoolExecutor
+        self._prefetch_pool = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="mediathek-prefetch")
+        self._hits = 0
+        self._misses = 0
+        self._speculative_filled = 0
+        self._evicted = 0
+
+    def _peek(self, url):
+        """Cache lookup. Returns body bytes or None. Does NOT track stats
+        — caller distinguishes hits/misses based on the return value."""
+        now = time.time()
+        with self._lock:
+            entry = self._cache.get(url)
+            if entry is None:
+                return None
+            expires_at, body = entry
+            if now >= expires_at:
+                del self._cache[url]
+                self._evicted += 1
+                return None
+            self._cache.move_to_end(url)
+            return body
+
+    def _put(self, url, body, ttl, speculative=False):
+        expires_at = time.time() + ttl
+        with self._lock:
+            if url in self._cache:
+                self._cache.move_to_end(url)
+            self._cache[url] = (expires_at, body)
+            if speculative:
+                self._speculative_filled += 1
+            while len(self._cache) > self.MAX_ENTRIES:
+                self._cache.popitem(last=False)
+                self._evicted += 1
+
+    def get_or_fetch_master(self, url, fetch_fn):
+        """Returns master.m3u8 body bytes. Cache-hit serves immediately;
+        miss fetches via fetch_fn, stores, and schedules background
+        prefetch of the variants this master points at."""
+        cached = self._peek(url)
+        if cached is not None:
+            with self._lock: self._hits += 1
+            return cached
+        with self._lock: self._misses += 1
+        body = fetch_fn(url)
+        self._put(url, body, self.MASTER_TTL)
+        # Speculative variant prefetch
+        try:
+            picked = _parse_master(url, body.decode())
+        except Exception:
+            picked = None
+        if picked:
+            video_url, audio_url, _ = picked
+            for variant_url in (video_url, audio_url):
+                if variant_url:
+                    self._prefetch_pool.submit(
+                        self._speculative_fetch_variant, variant_url, fetch_fn)
+        return body
+
+    def get_or_fetch_variant(self, url, fetch_fn):
+        """Returns variant playlist body bytes. Cache-hit is the common
+        case after master-fetch's speculative prefetch."""
+        cached = self._peek(url)
+        if cached is not None:
+            with self._lock: self._hits += 1
+            return cached
+        with self._lock: self._misses += 1
+        body = fetch_fn(url)
+        self._put(url, body, self.VARIANT_TTL)
+        return body
+
+    def _speculative_fetch_variant(self, url, fetch_fn):
+        """Background-fetch a variant we expect mpv to request soon. No
+        stats-tracking on hit-check (= we don't want speculative double-
+        check to inflate miss counter). On error: silent — speculative
+        is best-effort, real fetch will retry."""
+        if self._peek(url) is not None:
+            return
+        try:
+            body = fetch_fn(url)
+            self._put(url, body, self.VARIANT_TTL, speculative=True)
+        except Exception:
+            pass
+
+    def stats(self):
+        with self._lock:
+            total = self._hits + self._misses
+            hit_rate = (self._hits / total) if total else 0.0
+            return {
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": round(hit_rate, 3),
+                "speculative_filled": self._speculative_filled,
+                "evicted": self._evicted,
+                "size": len(self._cache),
+            }
+
+
+_mediathek_manifest_cache = _MediathekManifestCache()
+
+
+
 channels     = {}    # slug -> {"process","last_seen","started_at"}
 channel_map  = {}    # slug -> {"name","uuid"}
 codec_cache  = {}    # slug -> {"video": "h264"|..., "audio": "aac"|...}
@@ -7707,7 +7933,10 @@ def mediathek_passthru_master(slug):
             abort(404)
         base_url = info[0]
     try:
-        txt = urllib.request.urlopen(base_url, timeout=8).read().decode()
+        body = _mediathek_manifest_cache.get_or_fetch_master(
+            base_url,
+            lambda u: _mediathek_upstream_pool.urlopen(u, timeout=8))
+        txt = body.decode()
     except Exception as e:
         abort(502, f"upstream: {e}")
     picked = _parse_master(base_url, txt)
@@ -7745,7 +7974,10 @@ def mediathek_passthru_variant(slug):
     if not upstream or not upstream.startswith("http"):
         abort(400)
     try:
-        txt = urllib.request.urlopen(upstream, timeout=8).read().decode()
+        body = _mediathek_manifest_cache.get_or_fetch_variant(
+            upstream,
+            lambda u: _mediathek_upstream_pool.urlopen(u, timeout=8))
+        txt = body.decode()
     except Exception as e:
         abort(502, f"upstream: {e}")
     base = upstream.rsplit("/", 1)[0] + "/"
@@ -8056,6 +8288,168 @@ def api_recording_window(slug):
         c["hls_url"] = f"{HOST_URL}/recording/{c['uuid']}/index.m3u8"
     return _cors(Response(json.dumps({"chain": chain}),
                            mimetype="application/json"))
+
+
+@app.route("/api/internal/mediathek-cache-stats")
+def api_mediathek_cache_stats():
+    """Debug: hit/miss + speculative-prefetch counters for Step-1 verification."""
+    return _cors(Response(json.dumps(_mediathek_manifest_cache.stats(),
+                                       ensure_ascii=False, sort_keys=True),
+                          mimetype="application/json"))
+
+
+@app.route("/api/internal/mediathek-pool-stats")
+def api_mediathek_pool_stats():
+    """Debug: hit/miss counts + per-host pool sizes for Step-7 verification."""
+    return _cors(Response(json.dumps(_mediathek_upstream_pool.stats(),
+                                       ensure_ascii=False, sort_keys=True),
+                          mimetype="application/json"))
+
+
+@app.route("/api/tuners-in-use")
+def api_tuners_in_use():
+    """Per-mux snapshot of which channels currently hold a DVB-C tuner slot.
+
+    Used by the app-side Mux-Verify mode (Step-0 of gateway-speedup
+    initiative): request channel A, request channels A+B in parallel,
+    inspect this endpoint's by_mux delta. If delta-keys is 1 → A and B
+    share a mux/tuner. If 2 → different tuners. Pure metadata-free
+    verification — doesn't trust tvh's slug→mux mapping, watches actual
+    subscription state.
+
+    subscribers vs warm_only: a slug counts as "active" if a viewer has
+    pulled a segment within the last 5s. warm_only=true means the slot
+    is reserved (= ALWAYS_WARM or prewarm-pool) but no active viewer.
+    Both flavors reserve a tuner against TUNER_TOTAL — for the verify
+    test, the distinction is informational only.
+
+    Mediathek/IPTV passthru channels have no mux_uuid and are excluded.
+    """
+    now = time.time()
+    ACTIVE_WINDOW_S = 5.0
+
+    with active_lock:
+        active_snapshot = list(channels.items())
+    with cmap_lock:
+        cmap_snapshot = dict(channel_map)
+
+    by_mux = {}
+    for slug, info in active_snapshot:
+        if not info or info.get("process") is None:
+            continue
+        cm = cmap_snapshot.get(slug, {})
+        mux_uuid = cm.get("mux_uuid", "")
+        if not mux_uuid:
+            continue  # IPTV/passthru, no DVB tuner held
+        last_seen = info.get("last_seen", 0)
+        is_active = (now - last_seen) < ACTIVE_WINDOW_S
+        entry = by_mux.setdefault(mux_uuid, {
+            "name": cm.get("mux_name", ""),
+            "channels": [],
+            "subscribers": 0,
+            "warm_only": True,
+        })
+        entry["channels"].append(slug)
+        entry["subscribers"] += 1
+        if is_active:
+            entry["warm_only"] = False
+
+    return _cors(Response(
+        json.dumps({
+            "total": TUNER_TOTAL,
+            "in_use": len(by_mux),
+            "free": max(0, TUNER_TOTAL - len(by_mux)),
+            "by_mux": by_mux,
+        }, ensure_ascii=False, sort_keys=True),
+        mimetype="application/json"))
+
+
+@app.route("/api/pi-context")
+def api_pi_context():
+    """Aggregate Pi-side state for baseline-capture manifests. One
+    round-trip = one source-of-truth, replaces 4 separate API calls
+    in the dev's capture script. All sub-fetches best-effort: any
+    individual failure is silently degraded to a safe default
+    (= empty list / None) so a transient tvh hiccup doesn't tank
+    the whole capture run.
+    """
+    recs = []
+    try:
+        data = json.loads(urllib.request.urlopen(
+            f"{TVH_BASE}/api/dvr/entry/grid?limit=500",
+            timeout=5).read())
+        recs = [e["uuid"] for e in data.get("entries", [])
+                if e.get("sched_status") == "recording"]
+    except Exception:
+        pass
+    with active_lock:
+        warm = sorted(s for s, i in channels.items()
+                      if i and i.get("process") is not None)
+    load_1m = None
+    try:
+        load_1m = float(Path("/proc/loadavg").read_text().split()[0])
+    except Exception:
+        pass
+    n_subs = 0
+    try:
+        data = json.loads(urllib.request.urlopen(
+            f"{TVH_BASE}/api/status/subscriptions", timeout=5).read())
+        n_subs = len(data.get("entries", []))
+    except Exception:
+        pass
+    return _cors(Response(json.dumps({
+        "active_recordings": recs,
+        "active_subscriptions": n_subs,
+        "load_1m": load_1m,
+        "warm_streams": warm,
+        "ts": int(time.time()),
+    }, ensure_ascii=False, sort_keys=True), mimetype="application/json"))
+
+
+@app.route("/api/internal/force-evict-others", methods=["POST"])
+def api_force_evict_others():
+    """Capture-mode helper: stop all warm channels EXCEPT the ones in
+    ?keep=slug1,slug2. Lets baseline-capture scripts guarantee that
+    only the channel-under-test is warm during a measurement, so the
+    Pi5 load isn't polluted by stale tuners from earlier taps.
+
+    ALWAYS_WARM-pinned slugs are exempt (= same guard as the normal
+    LRU eviction).
+
+    NOT for production use — bypasses the normal WARM_TTL policy. Lives
+    under /api/internal/ to make that obvious.
+    """
+    keep = set((request.args.get("keep") or "").split(","))
+    keep.discard("")
+    with active_lock:
+        targets = [s for s, i in channels.items()
+                   if i and i.get("process") is not None
+                   and s not in keep
+                   and s not in ALWAYS_WARM]
+    for s in targets:
+        print(f"[force-evict] stopping {s}", flush=True)
+        stop_channel(s)
+    return _cors(Response(json.dumps({
+        "evicted": targets,
+        "kept": sorted(keep),
+    }), mimetype="application/json"))
+
+
+@app.route("/api/ready")
+def api_ready():
+    """Readiness probe. Returns ready=true once the initial channel-map
+    load has completed (= /play requests can resolve a slug). Used by
+    capture scripts to poll after `docker compose restart` instead of
+    a blind sleep — typical readiness is ~10-15s but cold first-load
+    can take 30s+ if tvh is also booting.
+    """
+    with cmap_lock:
+        n_channels = len(channel_map)
+    ready = n_channels > 0
+    return _cors(Response(json.dumps({
+        "ready": ready,
+        "channel_map_size": n_channels,
+    }), mimetype="application/json"))
 
 
 @app.route("/api/channels")
