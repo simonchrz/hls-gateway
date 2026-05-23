@@ -5536,27 +5536,58 @@ document.getElementById('fp-val-btn').addEventListener('click', async (ev) => {
     if uncertain:
         skip_note = (f" · {reviewed_skipped} weitere ausgeblendet "
                      f"(geprüfte Aufnahmen)" if reviewed_skipped else "")
+        # Group by show title so the user can pick a show to work on
+        # without scrolling through dominant shows (SpongeBob etc).
+        # Sort within-show by the existing (src, |p-0.5|) order so the
+        # most actionable frame surfaces first; shows themselves sorted
+        # by uncertain-frame-count DESC so the highest-leverage shows
+        # are at the top.
+        from collections import defaultdict
+        by_show = defaultdict(list)
+        for u in uncertain:
+            by_show[u["title"]].append(u)
+        shows_sorted = sorted(by_show.items(), key=lambda kv: -len(kv[1]))
+
         _section(f"Active-Learning Targets "
-                 f"({len(uncertain)} offen{skip_note})")
+                 f"({len(uncertain)} offen · {len(by_show)} Sendungen"
+                 f"{skip_note})")
         out.append("<p class='muted'>Frames mit hohem Trainings-Wert. "
                    "🎯 = Modell unsicher (p≈0.5). "
                    "⚠ = Modell sicher, aber Wall-Clock-Prior widerspricht "
                    "(z. B. 99% Werbung gesagt, aber dieser Sender hat zur Minute "
-                   "fast nie Werbung). Click → Player.</p>")
-        out.append("<table><tr><th></th><th>Show</th><th>Zeit</th>"
-                   "<th>p</th><th></th></tr>")
-        for u in uncertain[:30]:
-            mm = int(u["t"] // 60); ss = int(u["t"] % 60)
-            link = f"{HOST_URL}/recording/{u['uuid']}"
-            src = u.get("src", "unc")
-            icon = ("⚠" if src == "div" else
-                    "🎯⚠" if src == "both" else "🎯")
-            out.append(f"<tr><td title='{src}'>{icon}</td>"
-                       f"<td>{u['title']}</td>"
-                       f"<td>{mm}:{ss:02d}</td>"
-                       f"<td>{u['p']:.3f}</td>"
-                       f"<td><a href='{link}'>öffnen</a></td></tr>")
-        out.append("</table>")
+                   "fast nie Werbung). Click → Player. "
+                   "Sendungen aufklappen für die Frames.</p>")
+        PER_SHOW_CAP = 30
+        for title, frames in shows_sorted:
+            n = len(frames)
+            # Aggregate uuids in this show (= number of distinct recordings)
+            n_recs = len({f["uuid"] for f in frames})
+            out.append(
+                f"<details style='margin:6px 0;border:1px solid var(--border);"
+                f"border-radius:6px;padding:6px 10px'>"
+                f"<summary style='cursor:pointer;font-weight:600'>"
+                f"{title} <span class='muted' style='font-weight:400'>"
+                f"({n} frames · {n_recs} Aufnahme{'n' if n_recs != 1 else ''})"
+                f"</span></summary>"
+            )
+            out.append("<table style='margin-top:6px'>"
+                       "<tr><th></th><th>Zeit</th><th>p</th><th></th></tr>")
+            for u in frames[:PER_SHOW_CAP]:
+                mm = int(u["t"] // 60); ss = int(u["t"] % 60)
+                link = f"{HOST_URL}/recording/{u['uuid']}?t={int(u['t'])}"
+                src = u.get("src", "unc")
+                icon = ("⚠" if src == "div" else
+                        "🎯⚠" if src == "both" else "🎯")
+                out.append(f"<tr><td title='{src}'>{icon}</td>"
+                           f"<td>{mm}:{ss:02d}</td>"
+                           f"<td>{u['p']:.3f}</td>"
+                           f"<td><a href='{link}'>öffnen</a></td></tr>")
+            if n > PER_SHOW_CAP:
+                out.append(f"<tr><td colspan=4 class='muted' "
+                           f"style='font-style:italic'>"
+                           f"+{n - PER_SHOW_CAP} weitere frames (gekürzt)"
+                           f"</td></tr>")
+            out.append("</table></details>")
 
     # ── Per-Show EPG-Drift (Phase-4 manual show-start marks) ────
     _section("Per-Show EPG-Drift")
