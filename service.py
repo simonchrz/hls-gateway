@@ -992,22 +992,31 @@ def start_ffmpeg(slug):
     ch_dir.mkdir(parents=True, exist_ok=True)
 
     codecs = get_codecs(slug)
-    if codecs["video"] in SAFE_VIDEO:
-        video_opts = ["-c:v", "copy"]
-    else:
-        # MPEG-2 or unknown → transcode to H.264 for iOS compatibility.
-        # Scale anamorphic SD (720x576 SAR 64:45) to square pixels so
-        # iOS/Safari renders the correct 16:9 aspect instead of 4:3-ish.
-        video_opts = [
-            "-vf", "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-profile:v", "main",
-            "-pix_fmt", "yuv420p",
-            "-g", "50",                  # keyframe every ~2s
-            "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_TIME})",
-        ]
+    # Live-TV via tvh-IPTV: ALWAYS transcode to libx264, even if source is
+    # already h264. Reasons (2026-05-23 RTL incident):
+    #   1. Source GOP-intervals are not aligned with hls_time → copy-mode
+    #      produces mid-GOP segment cuts → iOS decoder shows green frames
+    #      until the next IDR.
+    #   2. Anamorphic SD (720x576 SAR 64:45 — RTL) needs scale+setsar for
+    #      iOS to render correct aspect; copy can't apply filters.
+    #   3. Source SPS/PPS arrive in-stream after a few seconds of "corrupt"-
+    #      looking packets that confuse ffmpeg's input demuxer.
+    # Transcode neutralises all three: libx264 emits fresh SPS/PPS + IDRs at
+    # exact segment boundaries via `-force_key_frames`. ~10 % Pi CPU per
+    # stream — acceptable since only tvh-IPTV channels hit this path
+    # (HD public broadcasters go through MEDIATHEK_LIVE passthrough).
+    # DVR-recording HLS-remux (_rec_hls_spawn_local) still copies h264 — that
+    # operates on completed files with predictable GOP structure.
+    video_opts = [
+        "-vf", "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-profile:v", "main",
+        "-pix_fmt", "yuv420p",
+        "-g", "50",                  # keyframe every ~2s
+        "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_TIME})",
+    ]
 
     if codecs["audio"] in SAFE_AUDIO:
         audio_opts = ["-c:a", "copy"]
@@ -1015,9 +1024,19 @@ def start_ffmpeg(slug):
         audio_opts = ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
 
     tvh_url = f"{TVH_BASE}/stream/channel/{info['uuid']}?profile=pass"
+    # No `+discardcorrupt`: even in transcode-mode the h264 decoder needs
+    # the initial in-stream SPS/PPS packets to sync. `+discardcorrupt` throws
+    # them away before the demuxer can sync — decoder starves indefinitely
+    # (RTL incident 2026-05-23: 0 frames decoded → libx264 has nothing to
+    # encode → 0 segments → watchdog kill loop).
+    # Longer analyzeduration/probesize lets the demuxer wait out RTL's slow
+    # initial packets (mp2 + ac3 audio + dvb_subtitle + dvb_teletext).
+    input_opts = ["-fflags", "+genpts",
+                  "-analyzeduration", "5000000",
+                  "-probesize", "5000000"]
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
-        "-fflags", "+genpts+discardcorrupt",
+        *input_opts,
         "-i", tvh_url,
         "-map", "0:v:0", "-map", "0:a:0",
         *video_opts, *audio_opts,
@@ -1035,8 +1054,7 @@ def start_ffmpeg(slug):
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
                              start_new_session=True)
-    mode = "passthrough" if codecs["video"] in SAFE_VIDEO and codecs["audio"] in SAFE_AUDIO \
-           else f"transcode v={codecs['video']} a={codecs['audio']}"
+    mode = f"transcode v={codecs['video']} a={codecs['audio']}"
     # Record pid + start time so we can re-adopt the ffmpeg if the
     # hls-gateway container restarts (segments keep rolling meanwhile).
     try:
