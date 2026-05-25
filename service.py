@@ -510,7 +510,7 @@ SAFE_AUDIO = {"aac"}
 # For listed slugs: no second (raw) HLS output is spawned, and
 # /api/app/live/<slug>/raw.m3u8 returns 404 so the app falls back to
 # the transcoded /index.m3u8 automatically.
-RAW_PASSTHRU_BLACKLIST = {"rtl"}
+RAW_PASSTHRU_BLACKLIST = {"rtl", "rtlzwei"}
 
 BASE_CSS = """
 :root {
