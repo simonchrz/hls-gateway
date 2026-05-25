@@ -502,16 +502,6 @@ stats_lock   = threading.RLock()
 SAFE_VIDEO = {"h264", "hevc"}
 SAFE_AUDIO = {"aac"}
 
-# Channels where copy-mode raw passthrough breaks decoder sync — RTL's
-# h264 GOP-structure (mid-GOP segment cuts + initial SPS/PPS delays)
-# produces green-block decode artifacts under -c:v copy, even though
-# every other h264 IPTV channel via the same tvh-pipeline copies cleanly.
-# Documented in /tmp/gateway-ll-hls-reply.md (RTL test 2026-05-25).
-# For listed slugs: no second (raw) HLS output is spawned, and
-# /api/app/live/<slug>/raw.m3u8 returns 404 so the app falls back to
-# the transcoded /index.m3u8 automatically.
-RAW_PASSTHRU_BLACKLIST = {"rtl", "rtlzwei"}
-
 BASE_CSS = """
 :root {
     --bg: #fafafa; --fg: #222; --muted: #777;
@@ -1044,23 +1034,10 @@ def start_ffmpeg(slug):
     input_opts = ["-fflags", "+genpts",
                   "-analyzeduration", "5000000",
                   "-probesize", "5000000"]
-    # Second HLS output: raw passthrough (video+audio copy) for mpv-class
-    # clients. Skips libx264 encoder buffer (~1-2 s of latency) at the cost
-    # of iOS-AVPlayer incompatibility. App opts in by fetching
-    # /api/app/live/<slug>/raw.m3u8 instead of /index.m3u8.
-    # One tvh subscription, one input decode, two HLS-mux outputs in one
-    # ffmpeg process — keeps tuner usage at 1/channel.
-    # Channels in RAW_PASSTHRU_BLACKLIST (= RTL) skip the second output
-    # entirely because their h264 GOP-structure breaks copy-mode.
-    raw_enabled = slug not in RAW_PASSTHRU_BLACKLIST
-    raw_dir = ch_dir / "raw"
-    if raw_enabled:
-        raw_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
         *input_opts,
         "-i", tvh_url,
-        # Output 1: transcoded for AVPlayer / web / generic HLS clients
         "-map", "0:v:0", "-map", "0:a:0",
         *video_opts, *audio_opts,
         "-start_at_zero",
@@ -1074,22 +1051,6 @@ def start_ffmpeg(slug):
         "-hls_segment_filename", str(ch_dir / "seg_%06d.ts"),
         str(ch_dir / "index.m3u8"),
     ]
-    if raw_enabled:
-        cmd += [
-            # Output 2: raw passthrough for mpv-class clients (low-latency)
-            "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "copy", "-c:a", "copy",
-            "-start_at_zero",
-            "-avoid_negative_ts", "make_zero",
-            "-f", "hls",
-            "-hls_time", str(SEGMENT_TIME),
-            "-hls_list_size", str(LIST_SIZE),
-            "-hls_flags",
-            "delete_segments+append_list+independent_segments+program_date_time",
-            "-hls_segment_type", "mpegts",
-            "-hls_segment_filename", str(raw_dir / "seg_%06d.ts"),
-            str(raw_dir / "index.m3u8"),
-        ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL,
                              start_new_session=True)
@@ -2054,174 +2015,6 @@ def app_live_segment(slug, filename):
            else "application/vnd.apple.mpegurl"
     return _cors(send_from_directory(HLS_DIR / slug, filename,
                                       mimetype=mime))
-
-
-@app.route("/api/app/live/<slug>/edge.m3u8")
-def app_live_edge_playlist(slug):
-    """Live-edge variant of the live playlist — same transcoded segments
-    as /index.m3u8, but only the last EDGE_KEEP segments listed (= small
-    manifest, no chance of player picking a buffered-back start point).
-
-    Reads the existing /data/hls/<slug>/index.m3u8 (which is the full
-    7200-segment DVR window produced by start_ffmpeg's transcoded output)
-    and tails it. No separate ffmpeg-spawn, no extra tvh subscription —
-    same shared stream, just a smaller manifest view.
-
-    Segment URIs are bare seg_NNNNNN.ts so they resolve via the existing
-    app_live_segment route (= no new segment handler needed)."""
-    EDGE_KEEP = 3
-    with cmap_lock:
-        if slug not in channel_map:
-            abort(404, "unknown channel")
-    if slug in MEDIATHEK_LIVE:
-        abort(404, "edge variant not available for mediathek-passthru channels")
-    _app_track(slug)
-    ensure_running(slug)
-    ch_dir = HLS_DIR / slug
-    playlist_path = ch_dir / "index.m3u8"
-    MIN_SEGMENTS = EDGE_KEEP
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if playlist_path.exists() and playlist_path.stat().st_size > 100:
-            segs = sorted(ch_dir.glob("seg_*.ts"))
-            if len(segs) >= MIN_SEGMENTS:
-                break
-        time.sleep(0.15)
-    if not playlist_path.exists():
-        abort(503, "stream not ready yet")
-    full = playlist_path.read_text()
-    # Split into header lines (everything before the first #EXTINF) and
-    # segment-entry lines (= pairs of #EXTINF + URI, plus optional PDT
-    # tags). Then keep only the last EDGE_KEEP entries.
-    lines = full.splitlines()
-    header = []
-    entries = []   # list of list-of-lines (1 entry = its #EXTINF, optional #EXT-X-PROGRAM-DATE-TIME, segment URI)
-    pending = []   # accumulates lines belonging to the current entry-in-progress
-    in_entries = False
-    for line in lines:
-        # Drop all DISCONTINUITY markers — the 3-segment tail-window
-        # rarely spans a real discontinuity in steady state, and a stray
-        # leading DISCONTINUITY tag would otherwise leak into the header
-        # (= confusing for players).
-        if line.startswith("#EXT-X-DISCONTINUITY"):
-            continue
-        if line.startswith("#EXTINF") or line.startswith("#EXT-X-PROGRAM-DATE-TIME"):
-            in_entries = True
-            pending.append(line)
-        elif in_entries and not line.startswith("#") and line.strip():
-            # segment URI line — completes an entry
-            pending.append(line)
-            entries.append(pending)
-            pending = []
-        elif not in_entries:
-            header.append(line)
-        # else: ignore other in-entry #-tags — trimming them is safer
-        # than carrying state into a tail-of-window slice
-    if not entries:
-        abort(503, "no segments listed yet")
-    kept = entries[-EDGE_KEEP:]
-    # Compute new MEDIA-SEQUENCE from the segment number of the first
-    # kept entry — manifest URIs are seg_NNNNNN.ts so parse the number.
-    first_uri = kept[0][-1]
-    m = re.search(r"seg_0*(\d+)\.ts", first_uri)
-    new_seq = int(m.group(1)) if m else 0
-    # Rebuild header with the updated EXT-X-MEDIA-SEQUENCE and drop any
-    # EXT-X-PLAYLIST-TYPE:EVENT (= this is a small live-window, not the
-    # full DVR EVENT-playlist).
-    new_header = []
-    seq_set = False
-    for line in header:
-        if line.startswith("#EXT-X-MEDIA-SEQUENCE"):
-            new_header.append(f"#EXT-X-MEDIA-SEQUENCE:{new_seq}")
-            seq_set = True
-        elif line.startswith("#EXT-X-PLAYLIST-TYPE"):
-            continue   # live-window is not EVENT
-        elif line.startswith("#EXT-X-START"):
-            continue   # tiny manifest = no need for hint
-        else:
-            new_header.append(line)
-    if not seq_set:
-        # Inject before the first non-tag line
-        new_header.insert(1, f"#EXT-X-MEDIA-SEQUENCE:{new_seq}")
-    out_lines = list(new_header)
-    for e in kept:
-        out_lines.extend(e)
-    resp = Response("\n".join(out_lines) + "\n",
-                     mimetype="application/vnd.apple.mpegurl")
-    resp.headers["Cache-Control"] = "no-cache"
-    return _cors(resp)
-
-
-@app.route("/api/app/live/<slug>/raw.m3u8")
-def app_live_raw_playlist(slug):
-    """Raw passthrough variant of the live playlist for mpv-class clients
-    that decode MPEG-2 natively. Skips libx264 encoder buffer (~1-2 s
-    saved vs transcoded /index.m3u8). NOT iOS-AVPlayer compatible for
-    MPEG-2-source channels — caller must know the client can decode the
-    source codec.
-
-    Same shared tvh subscription / ffmpeg process as the transcoded
-    output (dual-output ffmpeg, see start_ffmpeg)."""
-    with cmap_lock:
-        if slug not in channel_map:
-            abort(404, "unknown channel")
-    # Mediathek-passthru channels have no tuner ffmpeg (they upstream-
-    # passthru), so no raw variant exists for them.
-    if slug in MEDIATHEK_LIVE:
-        abort(404, "raw variant not available for mediathek-passthru channels")
-    if slug in RAW_PASSTHRU_BLACKLIST:
-        abort(404, "raw variant not available for this channel "
-                   "(copy-mode breaks decoder sync); use /index.m3u8 instead")
-    _app_track(slug)
-    ensure_running(slug)
-    raw_dir = HLS_DIR / slug / "raw"
-    playlist_path = raw_dir / "index.m3u8"
-    MIN_SEGMENTS = 10
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if playlist_path.exists() and playlist_path.stat().st_size > 100:
-            segs = sorted(raw_dir.glob("seg_*.ts"))
-            if len(segs) >= MIN_SEGMENTS:
-                break
-        time.sleep(0.15)
-    if not playlist_path.exists():
-        abort(503, "raw stream not ready yet")
-    content = playlist_path.read_text()
-    if "#EXT-X-START" not in content:
-        content = content.replace(
-            "#EXTM3U",
-            "#EXTM3U\n#EXT-X-START:TIME-OFFSET=-6",
-            1)
-    resp = Response(content, mimetype="application/vnd.apple.mpegurl")
-    resp.headers["Cache-Control"] = "no-cache"
-    return _cors(resp)
-
-
-@app.route("/api/app/live/<slug>/raw/<filename>")
-def app_live_raw_segment(slug, filename):
-    """Segment passthrough for the raw-variant playlist. Manifest URIs
-    are bare seg_NNNNNN.ts and resolve relative to the manifest URL
-    (= /api/app/live/<slug>/raw/), landing here."""
-    with cmap_lock:
-        if slug not in channel_map:
-            abort(404)
-    if slug in RAW_PASSTHRU_BLACKLIST:
-        abort(404)
-    if not (filename.endswith(".ts") or filename.endswith(".m3u8")):
-        abort(404)
-    raw_dir = HLS_DIR / slug / "raw"
-    fp = raw_dir / filename
-    if not fp.is_file():
-        abort(404)
-    with active_lock:
-        if slug in channels:
-            channels[slug]["last_seen"] = time.time()
-    with _app_lock:
-        if _app_session.get("slug") == slug:
-            _app_session["last_seen"] = time.time()
-    mime = "video/mp2t" if filename.endswith(".ts") \
-           else "application/vnd.apple.mpegurl"
-    return _cors(send_from_directory(raw_dir, filename, mimetype=mime))
 
 
 @app.route("/hls/<slug>/<filename>")
