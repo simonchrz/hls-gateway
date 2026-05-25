@@ -8258,6 +8258,206 @@ def mediathek_clip_audio(slug):
         abort(502, f"upstream: {e}")
 
 
+# === Mediathek poster + episode-thumbnail API ===========================
+# Two endpoints: /api/poster/show?topic=... (= wraps the existing show-meta
+# cascade _fetch_show_meta = fernsehserien.de → TMDB → TVmaze) and
+# /api/poster/episode?url=... (= og:image scrape of the episode landing
+# page, universal fallback that works for ARD/ZDF/3sat/arte). Shared
+# SQLite cache; 30d TTL for hits, 1d for 404 negatives so dead lookups
+# don't re-fetch on every app tap. Built for the iOS app's Mediathek-Tab
+# (2026-05-25, app-dev spec) — keeps poster-enrichment server-side so all
+# clients see the same images and no client embeds TMDB tokens.
+
+POSTER_CACHE_PATH = HLS_DIR / ".poster-cache.sqlite"
+POSTER_HIT_TTL_S  = 30 * 24 * 3600
+POSTER_MISS_TTL_S = 24 * 3600
+_poster_db_lock = threading.Lock()
+
+
+def _poster_db():
+    conn = sqlite3.connect(str(POSTER_CACHE_PATH), timeout=5)
+    conn.execute("""CREATE TABLE IF NOT EXISTS poster (
+        key TEXT PRIMARY KEY,
+        url TEXT,
+        expires_at INTEGER NOT NULL)""")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _poster_lookup(key):
+    """Returns (url_or_none, hit). hit=True means cached entry is fresh
+    (url may be None = cached 404). hit=False = miss, caller must fetch."""
+    now = int(time.time())
+    with _poster_db_lock:
+        conn = _poster_db()
+        try:
+            row = conn.execute(
+                "SELECT url, expires_at FROM poster WHERE key=?",
+                (key,)).fetchone()
+        finally:
+            conn.close()
+    if not row or row[1] < now:
+        return (None, False)
+    return (row[0] or None, True)
+
+
+def _poster_store(key, url):
+    """url=None caches a 404 negative (shorter TTL)."""
+    ttl = POSTER_MISS_TTL_S if url is None else POSTER_HIT_TTL_S
+    expires = int(time.time()) + ttl
+    with _poster_db_lock:
+        conn = _poster_db()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO poster (key, url, expires_at) "
+                "VALUES (?, ?, ?)", (key, url, expires))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+# Two regexes because og:image can be either property=... content=... or
+# content=... property=... — both orderings are valid HTML and seen in
+# the wild (ARD: property first, some ZDF templates: content first).
+_OG_IMAGE_RE_FWD = re.compile(
+    r'<meta[^>]+(?:property|name)=["\']og:image(?::secure_url)?["\']'
+    r'[^>]+content=["\']([^"\']+)["\']', re.IGNORECASE)
+_OG_IMAGE_RE_REV = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\']'
+    r'[^>]+(?:property|name)=["\']og:image(?::secure_url)?["\']',
+    re.IGNORECASE)
+
+# Browser-like UA — bot-blockers (Akamai, Cloudflare on some sender
+# pages) reject empty / Python-default UA strings outright.
+_POSTER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) "
+              "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+              "Version/17.0 Safari/605.1.15")
+
+
+def _scrape_og_image(page_url, timeout=8):
+    """Fetch HTML, regex out og:image, return absolute URL or None."""
+    try:
+        req = urllib.request.Request(page_url,
+                                      headers={"User-Agent": _POSTER_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            # og:image lives in <head>; 256 KB always reaches it even on
+            # bloated pages, keeps Pi RAM bounded and parse fast.
+            html = resp.read(256 * 1024).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    for pat in (_OG_IMAGE_RE_FWD, _OG_IMAGE_RE_REV):
+        m = pat.search(html)
+        if m:
+            img = m.group(1).strip()
+            if not img:
+                continue
+            # Resolve protocol-relative + root-relative URLs against page.
+            if img.startswith("//"):
+                img = "https:" + img
+            elif img.startswith("/"):
+                p = urllib.parse.urlparse(page_url)
+                img = f"{p.scheme}://{p.netloc}{img}"
+            return img
+    return None
+
+
+def _apply_width(url, w):
+    """Rewrite URL to request width=w if the image-CDN supports sizing.
+    Unknown URL patterns pass through unchanged."""
+    if not w or w <= 0 or not url:
+        return url
+    # TMDB: https://image.tmdb.org/t/p/wXXX/path.jpg — discrete widths only
+    m = re.match(r"(https://image\.tmdb\.org/t/p/)w\d+(/.+)", url)
+    if m:
+        valid = [92, 154, 185, 342, 500, 780]
+        chosen = min(valid, key=lambda v: abs(v - w))
+        return f"{m.group(1)}w{chosen}{m.group(2)}"
+    # ARD image service: api.ardmediathek.de/image-service/... — query param
+    if "api.ardmediathek.de/image-service/" in url:
+        p = urllib.parse.urlparse(url)
+        q = urllib.parse.parse_qs(p.query)
+        q["w"] = [str(w)]
+        return urllib.parse.urlunparse(
+            p._replace(query=urllib.parse.urlencode(q, doseq=True)))
+    # ZDF CDN: width param
+    if "cdn.zdf.de" in url or "zdf-cdn.live" in url:
+        p = urllib.parse.urlparse(url)
+        q = urllib.parse.parse_qs(p.query)
+        q["width"] = [str(w)]
+        return urllib.parse.urlunparse(
+            p._replace(query=urllib.parse.urlencode(q, doseq=True)))
+    return url
+
+
+@app.route("/api/poster/episode")
+def api_poster_episode():
+    """Resolve an episode-thumbnail by og:image-scraping the mediathek
+    episode landing page. 302 to image URL, 404 if not found.
+
+    Query params:
+      url=<https://...>   landing-page URL (required, from mediathekviewweb's
+                          url_website field)
+      w=<int>             optional image width hint, pass-through to ARD/ZDF/
+                          TMDB image services that support it
+    """
+    page_url = (request.args.get("url") or "").strip()
+    if not page_url.startswith("http"):
+        abort(400, "url required (must be absolute http/https)")
+    try:
+        w = int(request.args.get("w", "0"))
+    except ValueError:
+        w = 0
+    cache_key = f"ep|{page_url}"
+    cached_url, hit = _poster_lookup(cache_key)
+    if hit:
+        if cached_url is None:
+            abort(404)
+        return redirect(_apply_width(cached_url, w), code=302)
+    img = _scrape_og_image(page_url)
+    _poster_store(cache_key, img)   # stores None too = 404 negative
+    if img is None:
+        abort(404)
+    return redirect(_apply_width(img, w), code=302)
+
+
+@app.route("/api/poster/show")
+def api_poster_show():
+    """Resolve a show-poster by topic via the existing show-meta cascade
+    (_fetch_show_meta = fernsehserien.de → TMDB → TVmaze, with German-
+    source-first preference to dodge TMDB's English homonym confusion).
+    302 to image URL, 404 if no cascade source has a hit.
+
+    Query params:
+      topic=<name>        show name (required, from mediathekviewweb's
+                          topic field, e.g. "Tatort")
+      channel=<slug>      currently informational (cascade is title-driven);
+                          reserved for future per-channel disambiguation
+      w=<int>             optional image width hint, pass-through to TMDB
+    """
+    topic = (request.args.get("topic") or "").strip()
+    if not topic:
+        abort(400, "topic required")
+    try:
+        w = int(request.args.get("w", "0"))
+    except ValueError:
+        w = 0
+    cache_key = f"sh|{topic}"
+    cached_url, hit = _poster_lookup(cache_key)
+    if hit:
+        if cached_url is None:
+            abort(404)
+        return redirect(_apply_width(cached_url, w), code=302)
+    meta = _fetch_show_meta(topic) or {}
+    # tmdb_poster is the portrait (best for thumbnail-card display);
+    # poster (fernsehserien) is a landscape banner — fall back to it
+    # when TMDB has no hit.
+    img = meta.get("tmdb_poster") or meta.get("poster")
+    _poster_store(cache_key, img)
+    if not img:
+        abort(404)
+    return redirect(_apply_width(img, w), code=302)
+
+
 @app.route("/api/events/<slug>")
 def api_events(slug):
     """EPG events for a channel within a time window (default: last 2h +
