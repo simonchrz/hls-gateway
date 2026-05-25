@@ -2056,6 +2056,102 @@ def app_live_segment(slug, filename):
                                       mimetype=mime))
 
 
+@app.route("/api/app/live/<slug>/edge.m3u8")
+def app_live_edge_playlist(slug):
+    """Live-edge variant of the live playlist — same transcoded segments
+    as /index.m3u8, but only the last EDGE_KEEP segments listed (= small
+    manifest, no chance of player picking a buffered-back start point).
+
+    Reads the existing /data/hls/<slug>/index.m3u8 (which is the full
+    7200-segment DVR window produced by start_ffmpeg's transcoded output)
+    and tails it. No separate ffmpeg-spawn, no extra tvh subscription —
+    same shared stream, just a smaller manifest view.
+
+    Segment URIs are bare seg_NNNNNN.ts so they resolve via the existing
+    app_live_segment route (= no new segment handler needed)."""
+    EDGE_KEEP = 3
+    with cmap_lock:
+        if slug not in channel_map:
+            abort(404, "unknown channel")
+    if slug in MEDIATHEK_LIVE:
+        abort(404, "edge variant not available for mediathek-passthru channels")
+    _app_track(slug)
+    ensure_running(slug)
+    ch_dir = HLS_DIR / slug
+    playlist_path = ch_dir / "index.m3u8"
+    MIN_SEGMENTS = EDGE_KEEP
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if playlist_path.exists() and playlist_path.stat().st_size > 100:
+            segs = sorted(ch_dir.glob("seg_*.ts"))
+            if len(segs) >= MIN_SEGMENTS:
+                break
+        time.sleep(0.15)
+    if not playlist_path.exists():
+        abort(503, "stream not ready yet")
+    full = playlist_path.read_text()
+    # Split into header lines (everything before the first #EXTINF) and
+    # segment-entry lines (= pairs of #EXTINF + URI, plus optional PDT
+    # tags). Then keep only the last EDGE_KEEP entries.
+    lines = full.splitlines()
+    header = []
+    entries = []   # list of list-of-lines (1 entry = its #EXTINF, optional #EXT-X-PROGRAM-DATE-TIME, segment URI)
+    pending = []   # accumulates lines belonging to the current entry-in-progress
+    in_entries = False
+    for line in lines:
+        # Drop all DISCONTINUITY markers — the 3-segment tail-window
+        # rarely spans a real discontinuity in steady state, and a stray
+        # leading DISCONTINUITY tag would otherwise leak into the header
+        # (= confusing for players).
+        if line.startswith("#EXT-X-DISCONTINUITY"):
+            continue
+        if line.startswith("#EXTINF") or line.startswith("#EXT-X-PROGRAM-DATE-TIME"):
+            in_entries = True
+            pending.append(line)
+        elif in_entries and not line.startswith("#") and line.strip():
+            # segment URI line — completes an entry
+            pending.append(line)
+            entries.append(pending)
+            pending = []
+        elif not in_entries:
+            header.append(line)
+        # else: ignore other in-entry #-tags — trimming them is safer
+        # than carrying state into a tail-of-window slice
+    if not entries:
+        abort(503, "no segments listed yet")
+    kept = entries[-EDGE_KEEP:]
+    # Compute new MEDIA-SEQUENCE from the segment number of the first
+    # kept entry — manifest URIs are seg_NNNNNN.ts so parse the number.
+    first_uri = kept[0][-1]
+    m = re.search(r"seg_0*(\d+)\.ts", first_uri)
+    new_seq = int(m.group(1)) if m else 0
+    # Rebuild header with the updated EXT-X-MEDIA-SEQUENCE and drop any
+    # EXT-X-PLAYLIST-TYPE:EVENT (= this is a small live-window, not the
+    # full DVR EVENT-playlist).
+    new_header = []
+    seq_set = False
+    for line in header:
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE"):
+            new_header.append(f"#EXT-X-MEDIA-SEQUENCE:{new_seq}")
+            seq_set = True
+        elif line.startswith("#EXT-X-PLAYLIST-TYPE"):
+            continue   # live-window is not EVENT
+        elif line.startswith("#EXT-X-START"):
+            continue   # tiny manifest = no need for hint
+        else:
+            new_header.append(line)
+    if not seq_set:
+        # Inject before the first non-tag line
+        new_header.insert(1, f"#EXT-X-MEDIA-SEQUENCE:{new_seq}")
+    out_lines = list(new_header)
+    for e in kept:
+        out_lines.extend(e)
+    resp = Response("\n".join(out_lines) + "\n",
+                     mimetype="application/vnd.apple.mpegurl")
+    resp.headers["Cache-Control"] = "no-cache"
+    return _cors(resp)
+
+
 @app.route("/api/app/live/<slug>/raw.m3u8")
 def app_live_raw_playlist(slug):
     """Raw passthrough variant of the live playlist for mpv-class clients
