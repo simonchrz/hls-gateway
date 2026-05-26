@@ -502,6 +502,16 @@ stats_lock   = threading.RLock()
 SAFE_VIDEO = {"h264", "hevc"}
 SAFE_AUDIO = {"aac"}
 
+# Channels whose tvh-IPTV-input has chronic minor cc-errors that libx264's
+# default (B-frames + CABAC + multi-ref) amplifies into visible decoder
+# corruption via broken reference chains. For these, use an error-
+# resilient libx264 config: no B-frames, single reference, CABAC off,
+# aggressive keyframe interval. Trade-off: ~15-20% larger output bitrate
+# but decoder recovers from packet loss within 0.6s instead of cascading.
+# Currently only RTL — its FritzBox-SAT>IP source has ~0.6-1.5% TS cc-
+# errors that no amount of buffer-tuning eliminates (2026-05-26).
+ERROR_RESILIENT_TRANSCODE = {"rtl"}
+
 BASE_CSS = """
 :root {
     --bg: #fafafa; --fg: #222; --muted: #777;
@@ -1017,6 +1027,17 @@ def start_ffmpeg(slug):
         "-g", "50",                  # keyframe every ~2s
         "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_TIME})",
     ]
+    if slug in ERROR_RESILIENT_TRANSCODE:
+        # Override for channels with chronic source-side TS cc-errors
+        # (= RTL via FritzBox-SAT>IP). Defaults: B-frames + CABAC + multi-
+        # ref give 15-20% better compression BUT each broken ref-frame
+        # cascades into ~0.5-2 s of visible decoder corruption. Disabling
+        # B-frames, CABAC and multi-ref means each frame can recover
+        # within ~1 keyframe interval (= 0.6s with keyint=15 at 25fps).
+        video_opts += [
+            "-x264-params",
+            "keyint=15:scenecut=0:bframes=0:ref=1:b_pyramid=0:weightp=0:cabac=0",
+        ]
 
     if codecs["audio"] in SAFE_AUDIO:
         audio_opts = ["-c:a", "copy"]
