@@ -520,15 +520,7 @@ ERROR_RESILIENT_TRANSCODE = {"rtl"}
 # IPTV-input is the cause of the corruption — bypass it for affected
 # channels. See ~/src/tv-receiver/README.md.
 TV_RECEIVER_BASE = os.environ.get("TV_RECEIVER_BASE", "http://localhost:9983")
-# Only RTL routes through tv-receiver. Concurrent multi-channel RTSP-
-# sessions to the FritzBox 6690 SAT>IP server still broken even with
-# tv-receiver's TS-bus + explicit UDP transport (2026-05-26): the 2nd
-# channel subscribe consistently gets 0 RTP packets, despite separate
-# gortsplib Client instances and separate UDP receive-ports. Likely
-# a FritzBox-side client-IP session-tracking quirk that tvh works
-# around via shared-IPTV-input-with-internal-mux-multiplex. For now
-# only the chronically tvh-broken channel (RTL) gets the bypass.
-TV_RECEIVER_SLUGS = {"rtl"}
+TV_RECEIVER_SLUGS = {"rtl", "rtlzwei", "vox"}
 
 BASE_CSS = """
 :root {
@@ -1409,20 +1401,24 @@ def state_backup_loop():
 
 
 def disk_cleanup_loop():
-    """When /mnt/tv falls below DISK_MIN_FREE_GB, delete the oldest
-    `_rec_<uuid>/` HLS-VOD remux directories (LRU by mtime) until
-    there's again at least DISK_TARGET_FREE_GB free. The original .ts
-    recordings in /recordings stay — only the remuxed copies go, and
-    they're lazy-rebuilt on next playback."""
+    """When /mnt/tv falls below DISK_MIN_FREE_PCT of free space, delete
+    the oldest `_rec_<uuid>/` HLS-VOD remux directories (LRU by mtime)
+    until there's again at least DISK_TARGET_FREE_PCT free. The original
+    .ts recordings in /recordings stay — only the remuxed copies go, and
+    they're lazy-rebuilt on next playback.
+
+    Percentage-based so the trigger scales with disk size (previously
+    hardcoded 8 GB free, which on the 916 GB NVMe = 99.1% used before
+    cleanup kicked in — well past the pihole 96%-used alert)."""
     import shutil as _sh
-    DISK_MIN_FREE_GB = 8.0
-    DISK_TARGET_FREE_GB = 15.0
+    DISK_MIN_FREE_PCT    = 8.0   # cleanup triggers when free < 8% (= ~92% used)
+    DISK_TARGET_FREE_PCT = 15.0  # cleanup until free >= 15%   (= ~85% used)
     time.sleep(90)
     while True:
         try:
             usage = _sh.disk_usage(HLS_DIR)
-            free_gb = usage.free / (1024 ** 3)
-            if free_gb < DISK_MIN_FREE_GB:
+            free_pct = usage.free / usage.total * 100
+            if free_pct < DISK_MIN_FREE_PCT:
                 rec_dirs = []
                 for p in HLS_DIR.glob("_rec_*"):
                     if p.is_dir():
@@ -1431,7 +1427,8 @@ def disk_cleanup_loop():
                 rec_dirs.sort()   # oldest first
                 for mtime, p in rec_dirs:
                     usage = _sh.disk_usage(HLS_DIR)
-                    if usage.free / (1024 ** 3) >= DISK_TARGET_FREE_GB:
+                    cur_free_pct = usage.free / usage.total * 100
+                    if cur_free_pct >= DISK_TARGET_FREE_PCT:
                         break
                     try:
                         size_mb = sum(f.stat().st_size
@@ -1439,7 +1436,9 @@ def disk_cleanup_loop():
                                       if f.is_file()) / (1024 ** 2)
                         _sh.rmtree(p, ignore_errors=True)
                         print(f"[disk-cleanup] removed {p.name} "
-                              f"({size_mb:.0f} MB)", flush=True)
+                              f"({size_mb:.0f} MB, free now "
+                              f"{usage.free/(1024**3):.1f}GB / "
+                              f"{cur_free_pct:.1f}%)", flush=True)
                     except Exception as e:
                         print(f"[disk-cleanup] rm {p}: {e}", flush=True)
         except Exception as e:
