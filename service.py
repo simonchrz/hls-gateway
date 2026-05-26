@@ -520,6 +520,13 @@ ERROR_RESILIENT_TRANSCODE = {"rtl"}
 # IPTV-input is the cause of the corruption — bypass it for affected
 # channels. See ~/src/tv-receiver/README.md.
 TV_RECEIVER_BASE = os.environ.get("TV_RECEIVER_BASE", "http://localhost:9983")
+# Only RTL routes through tv-receiver for now. Adding more slugs would
+# create concurrent FritzBox-RTSP-sessions, and the FritzBox 6690 +
+# gortsplib combination breaks at 3 concurrent sessions (each new PLAY
+# starves the prior sessions' RTP flow, observed 2026-05-26). Fixing
+# this needs Phase 2: one RTSP-session per FritzBox-tuner, multiple
+# consumers via in-process TS-bus. Until then, only the chronically
+# broken channel (RTL via tvh) gets the tv-receiver bypass.
 TV_RECEIVER_SLUGS = {"rtl"}
 
 BASE_CSS = """
