@@ -512,6 +512,16 @@ SAFE_AUDIO = {"aac"}
 # errors that no amount of buffer-tuning eliminates (2026-05-26).
 ERROR_RESILIENT_TRANSCODE = {"rtl"}
 
+# Per-channel override: route the upstream RTSP-RTP-to-HTTP-TS stream
+# via tv-receiver (Go binary, gortsplib direct RTSP-client) instead of
+# tvh's IPTV-input. tv-receiver uses slug-keyed URLs, not UUIDs.
+# 2026-05-26: RTL added after a 15-min direct-RTSP test showed 0%
+# continuity-counter errors vs tvh's chronic 0.59-1.5%. tvh's
+# IPTV-input is the cause of the corruption — bypass it for affected
+# channels. See ~/src/tv-receiver/README.md.
+TV_RECEIVER_BASE = os.environ.get("TV_RECEIVER_BASE", "http://localhost:9983")
+TV_RECEIVER_SLUGS = {"rtl"}
+
 BASE_CSS = """
 :root {
     --bg: #fafafa; --fg: #222; --muted: #777;
@@ -1044,7 +1054,14 @@ def start_ffmpeg(slug):
     else:
         audio_opts = ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
 
-    tvh_url = f"{TVH_BASE}/stream/channel/{info['uuid']}?profile=pass"
+    if slug in TV_RECEIVER_SLUGS:
+        # Bypass tvh entirely for this channel — tv-receiver speaks the
+        # same /stream/channel/<slug>?profile=pass URL shape but keyed on
+        # slug instead of uuid, and uses a native Go RTSP-client that
+        # doesn't suffer tvh's chronic packet-loss on FritzBox-SAT>IP.
+        tvh_url = f"{TV_RECEIVER_BASE}/stream/channel/{slug}?profile=pass"
+    else:
+        tvh_url = f"{TVH_BASE}/stream/channel/{info['uuid']}?profile=pass"
     # No `+discardcorrupt`: even in transcode-mode the h264 decoder needs
     # the initial in-stream SPS/PPS packets to sync. `+discardcorrupt` throws
     # them away before the demuxer can sync — decoder starves indefinitely
