@@ -2003,20 +2003,29 @@ def playlist_m3u():
     return _cors(Response("\n".join(lines), mimetype="audio/x-mpegurl"))
 
 
-def _client_needs_ios_buffer(ua):
-    """iOS / Apple-stack HLS clients prebuffer heavily and stall hard
-    if the initial playlist has <10s of content listed. Desktop browsers,
-    mpv, ffplay, hls.js etc. don't have that quirk — they start playback
-    as soon as the first segment lands.
+def _client_min_segments(ua):
+    """Adaptive cold-start gate. Different HLS clients have very
+    different prebuffer behaviors at the first playlist GET:
 
-    Detected via User-Agent: AppleCoreMedia (= iOS/iPadOS/tvOS native
-    HLS), CFNetwork+Darwin (= AVFoundation), or Mobile Safari on iOS.
-    On match → MIN_SEGMENTS=10 (= original behavior, ~10s cold-start);
-    otherwise → MIN_SEGMENTS=2 (= ~5s cold-start)."""
-    ua = (ua or "").lower()
-    return any(t in ua for t in (
-        "applecoremedia", "iphone", "ipad", "appletv",
-    ))
+    - iOS AVFoundation (AppleCoreMedia, iPhone, iPad, AppleTV):
+      stalls or shows a still frame if the initial playlist lists too
+      few segments. Empirically 6 segments / 6s works (verified
+      2026-05-27 on iPhone Safari). Apple spec says ≥3 is the floor.
+    - mpv / libavformat (Lavf/N.N.N UA — covers our Kuckuck app, vlc,
+      desktop mpv, ffplay): tolerates 1 segment cleanly because it has
+      its own read-ahead demuxer cache and refetches the playlist on a
+      tick. Returning early saves ~1s of server-side wait.
+    - Everything else (hls.js, browser MSE, unknown): conservative 2.
+      hls.js typically wants ≥3 but tolerates 2 with appended segments
+      arriving via reload.
+
+    Logged at INFO so we can verify UA-detection in the field."""
+    ua_low = (ua or "").lower()
+    if any(t in ua_low for t in ("applecoremedia", "iphone", "ipad", "appletv")):
+        return 6, "ios"
+    if "lavf" in ua_low or "libmpv" in ua_low or "mpv/" in ua_low:
+        return 1, "mpv"
+    return 2, "default"
 
 
 @app.route("/hls/<slug>/index.m3u8")
@@ -2027,15 +2036,12 @@ def hls_playlist(slug):
     ensure_running(slug)
     ch_dir = HLS_DIR / slug
     playlist_path = ch_dir / "index.m3u8"
-    # Adaptive cold-start wait. iOS AVPlayer prebuffers aggressively
-    # (= shows still frame or stalls if the playlist lists too few
-    # segments at first GET); other clients (mpv, hls.js, browser MSE,
-    # ffplay) render the first frame as soon as they decode it.
-    # iOS=6 was reduced from 10 on 2026-05-27 — Apple's HLS spec only
-    # requires 3 listed segments to start; 6s of content is a safer
-    # margin against jitter. Revert to 10 if iPhone/AppleTV stalls.
-    min_segments = 6 if _client_needs_ios_buffer(
-        request.headers.get("User-Agent", "")) else 2
+    ua = request.headers.get("User-Agent", "")
+    min_segments, ua_class = _client_min_segments(ua)
+    # Temporary instrumentation (added 2026-05-27): verify that real
+    # Kuckuck-app + iPhone-Safari requests get routed to the right
+    # ua_class. Remove after a day of confirmation.
+    print(f"[hls-playlist] {slug} ua_class={ua_class} min={min_segments} ua={ua[:80]!r}", flush=True)
     deadline = time.time() + 30
     while time.time() < deadline:
         if playlist_path.exists() and playlist_path.stat().st_size > 100:
