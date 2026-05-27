@@ -1146,17 +1146,14 @@ def start_ffmpeg(slug):
     # them away before the demuxer can sync — decoder starves indefinitely
     # (RTL incident 2026-05-23: 0 frames decoded → libx264 has nothing to
     # encode → 0 segments → watchdog kill loop).
-    # analyzeduration/probesize: RTL's stream (mp2 + ac3 audio +
-    # dvb_subtitle + dvb_teletext) needs the full 5MB/5s for the
-    # demuxer to enumerate all tracks reliably. Clean h264+aac streams
-    # (= everything else) expose codec params within 200-300 KB, so
-    # keeping the cap at 1MB shaves ~1-1.5s off cold-start without
-    # affecting steady-state.
-    slow_analyze = slug in ERROR_RESILIENT_TRANSCODE
-    analyze_bytes = "5000000" if slow_analyze else "1000000"
+    # analyzeduration/probesize: reverted to 5MB on 2026-05-27 — the
+    # 1MB experiment (= ~1.5s cold-start saving) is suspected to cause
+    # periodic mid-stream stutters because ffmpeg sees too little of
+    # the source GOP pattern → wrong keyframe-insertion decisions →
+    # tiny segments. Restored full 5MB until confirmed otherwise.
     input_opts = ["-fflags", "+genpts",
-                  "-analyzeduration", analyze_bytes,
-                  "-probesize", analyze_bytes]
+                  "-analyzeduration", "5000000",
+                  "-probesize", "5000000"]
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
         *input_opts,
