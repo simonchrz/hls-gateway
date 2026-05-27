@@ -1146,11 +1146,17 @@ def start_ffmpeg(slug):
     # them away before the demuxer can sync — decoder starves indefinitely
     # (RTL incident 2026-05-23: 0 frames decoded → libx264 has nothing to
     # encode → 0 segments → watchdog kill loop).
-    # Longer analyzeduration/probesize lets the demuxer wait out RTL's slow
-    # initial packets (mp2 + ac3 audio + dvb_subtitle + dvb_teletext).
+    # analyzeduration/probesize: RTL's stream (mp2 + ac3 audio +
+    # dvb_subtitle + dvb_teletext) needs the full 5MB/5s for the
+    # demuxer to enumerate all tracks reliably. Clean h264+aac streams
+    # (= everything else) expose codec params within 200-300 KB, so
+    # keeping the cap at 1MB shaves ~1-1.5s off cold-start without
+    # affecting steady-state.
+    slow_analyze = slug in ERROR_RESILIENT_TRANSCODE
+    analyze_bytes = "5000000" if slow_analyze else "1000000"
     input_opts = ["-fflags", "+genpts",
-                  "-analyzeduration", "5000000",
-                  "-probesize", "5000000"]
+                  "-analyzeduration", analyze_bytes,
+                  "-probesize", analyze_bytes]
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
         *input_opts,
@@ -1997,6 +2003,22 @@ def playlist_m3u():
     return _cors(Response("\n".join(lines), mimetype="audio/x-mpegurl"))
 
 
+def _client_needs_ios_buffer(ua):
+    """iOS / Apple-stack HLS clients prebuffer heavily and stall hard
+    if the initial playlist has <10s of content listed. Desktop browsers,
+    mpv, ffplay, hls.js etc. don't have that quirk — they start playback
+    as soon as the first segment lands.
+
+    Detected via User-Agent: AppleCoreMedia (= iOS/iPadOS/tvOS native
+    HLS), CFNetwork+Darwin (= AVFoundation), or Mobile Safari on iOS.
+    On match → MIN_SEGMENTS=10 (= original behavior, ~10s cold-start);
+    otherwise → MIN_SEGMENTS=2 (= ~5s cold-start)."""
+    ua = (ua or "").lower()
+    return any(t in ua for t in (
+        "applecoremedia", "iphone", "ipad", "appletv",
+    ))
+
+
 @app.route("/hls/<slug>/index.m3u8")
 def hls_playlist(slug):
     with cmap_lock:
@@ -2005,15 +2027,15 @@ def hls_playlist(slug):
     ensure_running(slug)
     ch_dir = HLS_DIR / slug
     playlist_path = ch_dir / "index.m3u8"
-    # On cold-start, wait until enough segments exist for iOS to start
-    # rendering video (not just showing a still image). iOS' native
-    # HLS buffers aggressively — we need ~10s of content ready.
-    MIN_SEGMENTS = 10
+    # Adaptive cold-start wait: iOS-stack clients need ~10s of segments
+    # listed before they'll render video; everyone else starts on segment 2.
+    min_segments = 10 if _client_needs_ios_buffer(
+        request.headers.get("User-Agent", "")) else 2
     deadline = time.time() + 30
     while time.time() < deadline:
         if playlist_path.exists() and playlist_path.stat().st_size > 100:
             segs = sorted(ch_dir.glob("seg_*.ts"))
-            if len(segs) >= MIN_SEGMENTS:
+            if len(segs) >= min_segments:
                 break
         time.sleep(0.15)
     if not playlist_path.exists():
