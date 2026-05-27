@@ -2081,11 +2081,14 @@ def hls_playlist_dvr(slug):
     ensure_running(slug)
     ch_dir = HLS_DIR / slug
     playlist_path = ch_dir / "index.m3u8"
+    ua = request.headers.get("User-Agent", "")
+    min_segments, ua_class = _client_min_segments(ua)
+    print(f"[dvr-playlist] {slug} ua_class={ua_class} min={min_segments} ua={ua[:80]!r}", flush=True)
     deadline = time.time() + 25
     while time.time() < deadline:
         if playlist_path.exists() and playlist_path.stat().st_size > 100:
             segs = sorted(ch_dir.glob("seg_*.ts"))
-            if len(segs) >= 2:
+            if len(segs) >= min_segments:
                 break
         time.sleep(0.15)
     if not playlist_path.exists():
