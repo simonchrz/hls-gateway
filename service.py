@@ -520,7 +520,30 @@ ERROR_RESILIENT_TRANSCODE = {"rtl"}
 # IPTV-input is the cause of the corruption — bypass it for affected
 # channels. See ~/src/tv-receiver/README.md.
 TV_RECEIVER_BASE = os.environ.get("TV_RECEIVER_BASE", "http://localhost:9983")
-TV_RECEIVER_SLUGS = {"rtl", "rtlzwei", "vox"}
+
+# Fallback when tv-receiver is unreachable at startup. These three were
+# the first channels we routed through tv-receiver (originally to bypass
+# tvh's broken IPTV-input for RTL); they're guaranteed-present in any
+# sane tv-receiver channels.json.
+TV_RECEIVER_FALLBACK_SLUGS = {"rtl", "rtlzwei", "vox"}
+
+def _fetch_tv_receiver_slugs():
+    try:
+        with urllib.request.urlopen(
+            f"{TV_RECEIVER_BASE}/api/channels", timeout=3) as r:
+            data = json.load(r)
+            slugs = set(data.get("slugs") or [])
+            if slugs:
+                return slugs
+    except Exception as e:
+        print(f"tv-receiver /api/channels fetch failed: {e} — "
+              f"falling back to hardcoded set", flush=True)
+    return TV_RECEIVER_FALLBACK_SLUGS
+
+# Resolved at startup; refresh by restarting the container.
+TV_RECEIVER_SLUGS = _fetch_tv_receiver_slugs()
+print(f"tv-receiver routes {len(TV_RECEIVER_SLUGS)} channel slugs: "
+      f"{sorted(TV_RECEIVER_SLUGS)}", flush=True)
 
 BASE_CSS = """
 :root {
