@@ -11377,6 +11377,23 @@ def _rec_source_or_recover(uuid):
         return None
 
 
+def _host_to_container(p):
+    """Translate `/mnt/tv/...` (host path used by tv-receiver, which
+    runs on the Pi outside the container) to `/recordings/...` (the
+    bind-mount path inside this container). Pass other paths through
+    untouched. Returns str.
+
+    Background: when tv-receiver replaced tvh as the DVR backend, it
+    started writing schedules with full host-side filenames (e.g.
+    `/mnt/tv/Call Me Kat/...ts`). This container only sees `/mnt/tv`
+    via the `/recordings` mount, so Path("/mnt/tv/...").is_file()
+    returns False here and recording_source/source delivery 404s.
+    """
+    if p and p.startswith("/mnt/tv/"):
+        return "/recordings/" + p[len("/mnt/tv/"):]
+    return p
+
+
 def _rec_source_path(uuid):
     """Return the file path of the DVR recording inside this container
     (via the /recordings read-only mount). None if not found.
@@ -11394,7 +11411,7 @@ def _rec_source_path(uuid):
             timeout=6).read())
         for e in data.get("entries", []):
             if e.get("uuid") == uuid:
-                fn = e.get("filename") or ""
+                fn = _host_to_container(e.get("filename") or "")
                 if not fn:
                     return str(recovered) if recovered.is_file() else None
                 if Path(fn).is_file():
@@ -12931,23 +12948,36 @@ def _rec_playlist_as_vod(text, is_running=False):
 
 
 def _rec_state(uuid):
-    """Internal: ffmpeg state + segment progress for a recording uuid."""
+    """Internal: ffmpeg state + segment progress for a recording uuid.
+
+    Treats 0-byte index.m3u8 as missing — Mac-side training-snapshot
+    creates empty markers and a tar restore can drop those onto the
+    Pi (incident 2026-05-27: 230 empty placeholders blocked playback
+    for every old recording until they were deleted). `playlist.exists()`
+    alone is not enough.
+    """
     playlist = HLS_DIR / f"_rec_{uuid}" / "index.m3u8"
     info = _rec_hls_procs.get(uuid)
     running = info is not None and info["proc"].poll() is None
     segs = 0
-    if playlist.exists():
-        try:
+    real = False
+    try:
+        if playlist.is_file() and playlist.stat().st_size > 0:
+            real = True
             segs = playlist.read_text().count(".ts")
-        except Exception:
-            pass
-    # "done" means: playlist exists AND ffmpeg is not currently running.
-    # If ffmpeg was never started in this process lifetime but a full
-    # playlist is on disk from a prior run → also treated as done.
-    done = playlist.exists() and not running
+    except Exception:
+        pass
+    # "done" means: real playlist exists AND ffmpeg is not currently
+    # running. If ffmpeg was never started in this process lifetime
+    # but a full playlist is on disk from a prior run → also treated
+    # as done.
+    done = real and not running
+    # `playlist` attribute kept for compatibility — callers can still
+    # check .exists(), but should prefer the `real` flag for "is this
+    # a real playlist or just a 0-byte placeholder".
     total = (info or {}).get("total_segs", 0)
     return {"done": done, "segments": segs, "total": total,
-            "running": running, "playlist": playlist}
+            "running": running, "playlist": playlist, "real": real}
 
 
 @app.route("/recording/<uuid>/index.m3u8")
@@ -12963,7 +12993,13 @@ def recording_hls(uuid):
     recording_segment() below. iOS Safari accepts absolute paths but
     mpv/ffmpeg-based players treat them as filesystem paths and fail."""
     st = _rec_state(uuid)
-    if not st["playlist"].exists() and not st["running"]:
+    if not st["real"] and not st["running"]:
+        # Clean up any 0-byte placeholder so ffmpeg can start fresh.
+        try:
+            if st["playlist"].exists():
+                st["playlist"].unlink()
+        except Exception:
+            pass
         _rec_hls_spawn(uuid)
         st = _rec_state(uuid)
     # Wait for at least 10 segments OR the remux to actually be done.
@@ -18317,7 +18353,13 @@ def recording_hls_progress(uuid):
     """Lightweight progress poll for the player loader. Also kicks off
     ffmpeg if it hasn't started yet (so the player can just poll)."""
     st = _rec_state(uuid)
-    if not st["playlist"].exists() and not st["running"]:
+    if not st["real"] and not st["running"]:
+        # Clean up any 0-byte placeholder so ffmpeg can start fresh.
+        try:
+            if st["playlist"].exists():
+                st["playlist"].unlink()
+        except Exception:
+            pass
         _rec_hls_spawn(uuid)
         st = _rec_state(uuid)
     # Make sure comskip is on its way — idempotent, safe on every
