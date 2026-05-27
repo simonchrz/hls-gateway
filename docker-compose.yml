@@ -21,6 +21,7 @@ services:
       - ./libonnxruntime.so.1.25.0:/usr/lib/aarch64-linux-gnu/libonnxruntime.so:ro
     environment:
       - TVH_BASE=http://raspberrypi5lan:9981
+      - DVR_BACKEND=local
       - HOST_URL=https://raspberrypi5lan:8443
       - IDLE_TIMEOUT=30
       - FAV_TAG_UUID=ed43d130b6d7f8e56b063db6de8d2b06
