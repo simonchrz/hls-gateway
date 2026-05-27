@@ -2027,9 +2027,14 @@ def hls_playlist(slug):
     ensure_running(slug)
     ch_dir = HLS_DIR / slug
     playlist_path = ch_dir / "index.m3u8"
-    # Adaptive cold-start wait: iOS-stack clients need ~10s of segments
-    # listed before they'll render video; everyone else starts on segment 2.
-    min_segments = 10 if _client_needs_ios_buffer(
+    # Adaptive cold-start wait. iOS AVPlayer prebuffers aggressively
+    # (= shows still frame or stalls if the playlist lists too few
+    # segments at first GET); other clients (mpv, hls.js, browser MSE,
+    # ffplay) render the first frame as soon as they decode it.
+    # iOS=6 was reduced from 10 on 2026-05-27 — Apple's HLS spec only
+    # requires 3 listed segments to start; 6s of content is a safer
+    # margin against jitter. Revert to 10 if iPhone/AppleTV stalls.
+    min_segments = 6 if _client_needs_ios_buffer(
         request.headers.get("User-Agent", "")) else 2
     deadline = time.time() + 30
     while time.time() < deadline:
