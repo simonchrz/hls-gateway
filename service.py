@@ -133,6 +133,7 @@ CODEC_CACHE_FILE = HLS_DIR / ".codec_cache.json"
 STATS_FILE       = HLS_DIR / ".usage_stats.json"
 EPG_ARCHIVE_FILE = HLS_DIR / ".epg_archive.jsonl"
 ALWAYS_WARM_FILE = HLS_DIR / ".always_warm.json"
+FAVORITES_FILE   = HLS_DIR / ".favorites.json"  # {"slugs": [...]} — replaces tvh's FAV_TAG_UUID tag-based favorites
 EPG_META_FILE    = HLS_DIR / ".epg_meta.json"  # tvmaze poster + rating cache
 USER_GROUPS_FILE = HLS_DIR / ".user-groups.json"  # manual recording groups (= cross-title franchise grouping like Rocky/Asterix)
 AUTO_SCHED_LOG   = HLS_DIR / ".tvd-models" / "auto-schedule-log.jsonl"  # one JSON-line per auto-schedule decision (success or skip)
@@ -780,44 +781,111 @@ def slugify(name):
     return s
 
 
-def load_favorites():
-    data = json.loads(urllib.request.urlopen(
-        f"{TVH_BASE}/api/channel/grid?limit=500", timeout=10).read())
-    # Map service UUID → transponder mux so we can tell the user which
-    # channels share a physical tuner. Channels on the same mux stream
-    # for free (tvheadend shares the transponder).
-    svc_to_mux = {}
+def _migrate_favorites_from_tvh():
+    """One-time migration: read tvh's FAV_TAG_UUID-tagged channels and
+    write the resulting slug list to FAVORITES_FILE. Called only when the
+    file doesn't exist yet."""
     try:
-        sdata = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/mpegts/service/grid?limit=2000",
-            timeout=10).read())
-        for s in sdata.get("entries", []):
-            svc_to_mux[s["uuid"]] = (
-                s.get("multiplex_uuid", ""),
-                s.get("multiplex", ""),
-            )
+        data = json.loads(urllib.request.urlopen(
+            f"{TVH_BASE}/api/channel/grid?limit=500", timeout=10).read())
+        slugs = sorted({
+            slugify(e["name"]) for e in data.get("entries", [])
+            if FAV_TAG_UUID in e.get("tags", [])
+        })
+        FAVORITES_FILE.write_text(json.dumps({"slugs": slugs}, indent=2))
+        print(f"migrated {len(slugs)} favorites from tvh → {FAVORITES_FILE}",
+              flush=True)
+        return slugs
     except Exception as e:
-        print(f"service grid fetch: {e}", flush=True)
+        print(f"favorites migration from tvh failed: {e}", flush=True)
+        return []
+
+
+def _read_favorites():
+    if not FAVORITES_FILE.exists():
+        return _migrate_favorites_from_tvh()
+    try:
+        return json.loads(FAVORITES_FILE.read_text()).get("slugs", [])
+    except Exception as e:
+        print(f"favorites file read failed: {e}", flush=True)
+        return []
+
+
+def load_favorites():
+    """Build channel_map from tv-receiver's /api/channels for channels in
+    FAVORITES_FILE. UUIDs are slug-based stable IDs (= hash(slug) hex
+    prefix) since tv-receiver doesn't use tvh's UUID scheme; downstream
+    code that uses the uuid for tvh stream-URL fallback now hits
+    TV_RECEIVER_BASE/stream/channel/<slug> instead (= start_ffmpeg already
+    branches on TV_RECEIVER_SLUGS).
+
+    For channels NOT known to tv-receiver, we fall back to fetching from
+    tvh — keeps non-FTA / non-m3u channels (= anything not derived from
+    FritzBox tvsd.m3u + tvhd.m3u) reachable until tvh is fully removed."""
+    fav_slugs = set(_read_favorites())
     new_map = {}
-    for e in data.get("entries", []):
-        if FAV_TAG_UUID not in e.get("tags", []):
-            continue
-        icon = e.get("icon_public_url") or ""
-        # tvheadend returns icon URLs as relative like "imagecache/123".
-        # We proxy /imagecache/* via the same HOST_URL to avoid mixed-content
-        # (if HOST_URL is https) — Caddy reverse-proxies imagecache to tvheadend.
-        if icon and not icon.startswith("http"):
-            icon = f"{HOST_URL}/{icon.lstrip('/')}"
-        svcs = e.get("services", [])
-        mux_uuid, mux_name = svc_to_mux.get(svcs[0], ("", "")) if svcs else ("", "")
-        new_map[slugify(e["name"])] = {
-            "name": e["name"], "uuid": e["uuid"], "icon": icon,
-            "mux_uuid": mux_uuid, "mux_name": mux_name,
-        }
+
+    # Try tv-receiver first.
+    try:
+        with urllib.request.urlopen(
+            f"{TV_RECEIVER_BASE}/api/channels", timeout=5) as r:
+            tvr = json.load(r)
+        for ch in tvr.get("channels", []):
+            slug = ch["slug"]
+            if fav_slugs and slug not in fav_slugs:
+                continue
+            freq = ch.get("freq", 0)
+            new_map[slug] = {
+                "name":     ch["name"],
+                "uuid":     slug,           # not used when slug routes via tv-receiver
+                "icon":     "",
+                "mux_uuid": f"freq-{freq}",
+                "mux_name": f"{freq}MHz",
+            }
+    except Exception as e:
+        print(f"tv-receiver /api/channels fetch failed: {e}", flush=True)
+
+    # Fall back to tvh for any favorite slug tv-receiver doesn't know.
+    # Skips entirely if all favorites are already covered.
+    missing = fav_slugs - set(new_map.keys()) if fav_slugs else set()
+    if missing:
+        try:
+            data = json.loads(urllib.request.urlopen(
+                f"{TVH_BASE}/api/channel/grid?limit=500", timeout=10).read())
+            svc_to_mux = {}
+            try:
+                sdata = json.loads(urllib.request.urlopen(
+                    f"{TVH_BASE}/api/mpegts/service/grid?limit=2000",
+                    timeout=10).read())
+                for s in sdata.get("entries", []):
+                    svc_to_mux[s["uuid"]] = (
+                        s.get("multiplex_uuid", ""),
+                        s.get("multiplex", ""),
+                    )
+            except Exception as e:
+                print(f"tvh service grid fetch: {e}", flush=True)
+            for e in data.get("entries", []):
+                slug = slugify(e["name"])
+                if slug not in missing:
+                    continue
+                icon = e.get("icon_public_url") or ""
+                if icon and not icon.startswith("http"):
+                    icon = f"{HOST_URL}/{icon.lstrip('/')}"
+                svcs = e.get("services", [])
+                mux_uuid, mux_name = svc_to_mux.get(svcs[0], ("", "")) if svcs else ("", "")
+                new_map[slug] = {
+                    "name": e["name"], "uuid": e["uuid"], "icon": icon,
+                    "mux_uuid": mux_uuid, "mux_name": mux_name,
+                }
+        except Exception as e:
+            print(f"tvh channel grid fallback: {e}", flush=True)
+
     with cmap_lock:
         channel_map.clear()
         channel_map.update(new_map)
-    print(f"Loaded {len(new_map)} favorite channels", flush=True)
+    print(f"loaded {len(new_map)} favorite channels "
+          f"(tv-receiver: {len(new_map) - len(missing & set(new_map.keys()))}, "
+          f"tvh-fallback: {len(missing & set(new_map.keys()))})", flush=True)
 
 
 def probe_codecs(slug):
@@ -8749,13 +8817,20 @@ def api_pi_context():
         load_1m = float(Path("/proc/loadavg").read_text().split()[0])
     except Exception:
         pass
+    # Count active subscriptions. Try tv-receiver first (= the slots that
+    # are actually serving live consumers); fall back to tvh if unreachable.
     n_subs = 0
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/status/subscriptions", timeout=5).read())
+            f"{TV_RECEIVER_BASE}/api/status/subscriptions", timeout=3).read())
         n_subs = len(data.get("entries", []))
     except Exception:
-        pass
+        try:
+            data = json.loads(urllib.request.urlopen(
+                f"{TVH_BASE}/api/status/subscriptions", timeout=5).read())
+            n_subs = len(data.get("entries", []))
+        except Exception:
+            pass
     return _cors(Response(json.dumps({
         "active_recordings": recs,
         "active_subscriptions": n_subs,
