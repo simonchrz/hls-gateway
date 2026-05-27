@@ -101,6 +101,18 @@ COMSKIP_INI_PER_CHANNEL = {
 
 
 TVH_BASE       = os.environ.get("TVH_BASE", "http://localhost:9981")
+# DVR_BACKEND chooses where /api/dvr/* + /api/autorec + /api/idnode/save
+# calls are routed:
+#   "tvh"    — original tvh container (default)
+#   "local"  — tv-receiver's tvh-compat shim (= our own DVR engine)
+DVR_BACKEND    = os.environ.get("DVR_BACKEND", "tvh")
+
+
+def dvr_base():
+    """Base URL for DVR/autorec/idnode HTTP calls. Honors DVR_BACKEND."""
+    if DVR_BACKEND == "local":
+        return TV_RECEIVER_BASE
+    return TVH_BASE
 HOST_URL       = os.environ.get("HOST_URL", "http://raspberrypi5lan:8080")
 IDLE_TIMEOUT   = int(os.environ.get("IDLE_TIMEOUT", "120"))
 MAX_WARM_STREAMS = int(os.environ.get("MAX_WARM_STREAMS", "3"))
@@ -135,11 +147,6 @@ STATS_FILE       = HLS_DIR / ".usage_stats.json"
 EPG_ARCHIVE_FILE = HLS_DIR / ".epg_archive.jsonl"
 ALWAYS_WARM_FILE = HLS_DIR / ".always_warm.json"
 FAVORITES_FILE   = HLS_DIR / ".favorites.json"  # {"slugs": [...]} — replaces tvh's FAV_TAG_UUID tag-based favorites
-EPG_XMLTV_URL    = os.environ.get(
-    "EPG_XMLTV_URL",
-    "https://epgshare01.online/epgshare01/epg_ripper_DE1.xml.gz")
-EPG_XMLTV_CACHE  = HLS_DIR / ".epg_xmltv.json"  # parsed {slug: [events]} — refreshed daily
-EPG_XMLTV_TTL    = 86400  # refetch once per day
 EPG_META_FILE    = HLS_DIR / ".epg_meta.json"  # tvmaze poster + rating cache
 USER_GROUPS_FILE = HLS_DIR / ".user-groups.json"  # manual recording groups (= cross-title franchise grouping like Rocky/Asterix)
 AUTO_SCHED_LOG   = HLS_DIR / ".tvd-models" / "auto-schedule-log.jsonl"  # one JSON-line per auto-schedule decision (success or skip)
@@ -2255,181 +2262,41 @@ def epg_snapshot_loop():
             print(f"snapshot loop: {e}", flush=True)
         time.sleep(EPG_SNAPSHOT_INTERVAL)
 
-# ---- XMLTV EPG ingest (replaces tvh /api/epg/events/grid) ----
-
-_xmltv_events = {}        # slug -> list of events sorted by start
-_xmltv_events_lock = threading.Lock()
-_xmltv_loaded_at = 0
-
-
-def _parse_xmltv_time(t):
-    """XMLTV time: 'YYYYMMDDHHMMSS +HHMM' → unix epoch."""
-    # strptime handles the offset format if we transform '+HHMM' → '+HH:MM'
-    # but pythons strptime '%z' accepts both, so direct works on 3.7+
-    return int(datetime.datetime.strptime(t, "%Y%m%d%H%M%S %z").timestamp())
-
-
-def _xmltv_slug_for(display_name, our_slugs_set):
-    """Map an XMLTV <display-name> to one of our channel slugs.
-    Tries: exact slugify match, then strip -hd/-sd suffix and match.
-    Returns a list (= one display-name can match multiple our-slugs when
-    we carry both SD + HD entries for the same channel)."""
-    candidate = slugify(display_name)
-    matches = []
-    for s in our_slugs_set:
-        if s == candidate:
-            matches.append(s)
-        elif re.sub(r'-(?:hd|sd)$', '', s) == candidate:
-            matches.append(s)
-    return matches
-
-
-def fetch_xmltv_epg(force=False):
-    """Download XMLTV from EPG_XMLTV_URL, parse, map XMLTV-channel-ids
-    to our channel slugs, write to EPG_XMLTV_CACHE. Refreshes at most
-    once per EPG_XMLTV_TTL unless force=True. Returns count of (slug,
-    event) pairs parsed."""
-    global _xmltv_loaded_at
-    now = time.time()
-    if not force and EPG_XMLTV_CACHE.exists():
-        age = now - EPG_XMLTV_CACHE.stat().st_mtime
-        if age < EPG_XMLTV_TTL:
-            return  # still fresh
-
-    try:
-        req = urllib.request.Request(EPG_XMLTV_URL,
-            headers={"User-Agent": "hls-gateway/1.0"})
-        raw = urllib.request.urlopen(req, timeout=60).read()
-        if EPG_XMLTV_URL.endswith(".gz"):
-            import gzip
-            raw = gzip.decompress(raw)
-    except Exception as e:
-        print(f"[xmltv-epg] fetch failed: {e}", flush=True)
-        return
-
-    import xml.etree.ElementTree as ET
-    try:
-        root = ET.fromstring(raw)
-    except Exception as e:
-        print(f"[xmltv-epg] parse failed: {e}", flush=True)
-        return
-
-    # Build XMLTV-channel-id → [our_slugs] index.
-    with cmap_lock:
-        our_slugs = set(channel_map.keys())
-    # Also include the full tv-receiver slug set so the cache covers
-    # non-favorite channels too — keeps the data ready for autorec
-    # decisions that scan beyond the user's favorites.
-    our_slugs = our_slugs | TV_RECEIVER_SLUGS
-
-    xmltv_chan_to_slugs = {}
-    for ch in root.findall("channel"):
-        xmltv_id = ch.get("id")
-        if not xmltv_id:
-            continue
-        # Some XMLTV files have multiple <display-name> entries; try all.
-        for dn in ch.findall("display-name"):
-            txt = (dn.text or "").strip()
-            if not txt:
-                continue
-            matches = _xmltv_slug_for(txt, our_slugs)
-            if matches:
-                xmltv_chan_to_slugs[xmltv_id] = matches
-                break
-
-    # Parse programmes.
-    events_by_slug = {}
-    for prog in root.findall("programme"):
-        xmltv_id = prog.get("channel")
-        slugs = xmltv_chan_to_slugs.get(xmltv_id)
-        if not slugs:
-            continue
-        try:
-            start = _parse_xmltv_time(prog.get("start"))
-            stop  = _parse_xmltv_time(prog.get("stop"))
-        except Exception:
-            continue
-        title = (prog.findtext("title") or "?").strip()
-        subtitle = (prog.findtext("sub-title") or "").strip()
-        desc = (prog.findtext("desc") or "").strip()
-        # Use start-time as a stable event_id (= XMLTV doesn't carry IDs).
-        ev_id = start
-        for slug in slugs:
-            events_by_slug.setdefault(slug, []).append({
-                "start": start, "stop": stop,
-                "title": title, "subtitle": subtitle, "desc": desc,
-                "event_id": ev_id,
-            })
-
-    for slug in events_by_slug:
-        events_by_slug[slug].sort(key=lambda e: e["start"])
-
-    n_evs = sum(len(v) for v in events_by_slug.values())
-    print(f"[xmltv-epg] parsed {n_evs} events for {len(events_by_slug)}/"
-          f"{len(xmltv_chan_to_slugs)} matched channels", flush=True)
-
-    EPG_XMLTV_CACHE.write_text(json.dumps(events_by_slug, ensure_ascii=False))
-    with _xmltv_events_lock:
-        _xmltv_events.clear()
-        _xmltv_events.update(events_by_slug)
-        _xmltv_loaded_at = now
-
-
-def _load_xmltv_cache():
-    if not EPG_XMLTV_CACHE.exists():
-        return
-    try:
-        with _xmltv_events_lock:
-            _xmltv_events.clear()
-            _xmltv_events.update(json.loads(EPG_XMLTV_CACHE.read_text()))
-        print(f"[xmltv-epg] loaded cache with "
-              f"{sum(len(v) for v in _xmltv_events.values())} events "
-              f"across {len(_xmltv_events)} channels", flush=True)
-    except Exception as e:
-        print(f"[xmltv-epg] cache read failed: {e}", flush=True)
-
-
-def xmltv_epg_refresh_loop():
-    """Background thread: refresh XMLTV EPG once per day."""
-    _load_xmltv_cache()
-    # Force initial fetch if cache is empty
-    with _xmltv_events_lock:
-        empty = not _xmltv_events
-    if empty:
-        fetch_xmltv_epg(force=True)
-    while True:
-        time.sleep(3600)  # check hourly, fetch_xmltv_epg gates on TTL
-        try:
-            fetch_xmltv_epg()
-        except Exception as e:
-            print(f"[xmltv-epg] loop error: {e}", flush=True)
+# ---- EPG: now served by tv-receiver /api/epg/* ----
+# The XMLTV fetcher + parser previously here was migrated to tv-receiver
+# (Go) 2026-05-27 — see tv-receiver/epg.go. hls-gateway now just GETs
+# from tv-receiver. Fallback to tvh remains for slugs tv-receiver doesn't
+# know (= legacy / non-m3u channels).
 
 
 def _fetch_channel_events(ch_uuid, now_ts, horizon_ts, slug=None):
     """Returns events list for the channel within [now_ts, horizon_ts).
 
-    Slug-based XMLTV cache is consulted first; falls back to tvh's
-    /api/epg/events/grid (queried by UUID) when XMLTV has no data for
-    this slug."""
-    # Try local XMLTV cache (slug-keyed)
+    Primary source: tv-receiver /api/epg/events/grid?slug=<slug>&from&to.
+    Falls back to tvh /api/epg/events/grid (queried by UUID) when
+    tv-receiver has no data for this slug or is unreachable."""
+    # Try tv-receiver (slug-keyed, our local EPG store)
     if slug:
-        with _xmltv_events_lock:
-            events = _xmltv_events.get(slug)
-        if events:
-            out = []
-            for e in events:
-                if e["stop"] <= now_ts or e["start"] >= horizon_ts:
-                    continue
-                out.append({
-                    "start": e["start"], "stop": e["stop"],
-                    "title": e.get("title", "?"),
+        try:
+            url = (f"{TV_RECEIVER_BASE}/api/epg/events/grid"
+                   f"?slug={urllib.parse.quote(slug)}"
+                   f"&from={now_ts}&to={horizon_ts}")
+            data = json.loads(urllib.request.urlopen(url, timeout=4).read())
+            events = (data.get("events") or {}).get(slug) or []
+            if events:
+                # Map tv-receiver shape → hls-gateway/tvh-compat shape
+                # (= "subtitle" field name matches; "event_id" matches).
+                return [{
+                    "start":    e["start"],
+                    "stop":     e["stop"],
+                    "title":    e.get("title", "?"),
                     "subtitle": e.get("subtitle", ""),
                     "event_id": e.get("event_id"),
-                })
-            if out:
-                return out
+                } for e in events]
+        except Exception as e:
+            print(f"tv-receiver epg fetch {slug}: {e}", flush=True)
 
-    # Fallback: tvh's EPG via uuid
+    # Fallback: tvh's EPG via uuid (= for channels not in tv-receiver)
     try:
         params = urllib.parse.urlencode({
             "limit": 60, "channel": ch_uuid, "sort": "start",
@@ -2561,7 +2428,7 @@ def epg_grid():
     scheduled = {}
     try:
         dvr_data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
             timeout=5).read())
         for d in dvr_data.get("entries", []):
             scheduled[(d.get("channel"), d.get("start"))] = d.get("uuid")
@@ -4196,7 +4063,7 @@ def _autorec_titles() -> set:
     out = set()
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/autorec/grid?limit=500",
+            f"{dvr_base()}/api/dvr/autorec/grid?limit=500",
             timeout=5).read().decode("utf-8", errors="replace"))
         for e in d.get("entries", []):
             t = (e.get("title") or "")
@@ -4311,7 +4178,7 @@ def _count_active_auto_scheduled() -> int:
         return 0
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=10).read())
     except Exception:
         return 0
@@ -4467,7 +4334,7 @@ def _auto_schedule_run(max_n: int = AUTO_SCHED_MAX_PER_DAY,
     # an EPG event that's already on the calendar manually).
     try:
         sched = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=10).read())
         existing_eids = {e.get("broadcast")
                          for e in sched.get("entries", [])
@@ -4616,7 +4483,7 @@ def _auto_schedule_run(max_n: int = AUTO_SCHED_MAX_PER_DAY,
                     "stop_extra": 10,
                 }).encode()
                 req = urllib.request.Request(
-                    f"{TVH_BASE}/api/dvr/entry/create_by_event",
+                    f"{dvr_base()}/api/dvr/entry/create_by_event",
                     data=body, method="POST")
                 res = urllib.request.urlopen(req, timeout=10).read().decode()
                 rd = json.loads(res) if res else {}
@@ -4710,7 +4577,7 @@ def _adaptive_padding_extend_tvh(uuid_str, current_stop_extra_min):
         "node": json.dumps({"uuid": uuid_str, "stop_extra": new_extra})
     }).encode()
     req = urllib.request.Request(
-        f"{TVH_BASE}/api/idnode/save",
+        f"{dvr_base()}/api/idnode/save",
         data=body, method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"})
     urllib.request.urlopen(req, timeout=10).read()
@@ -4787,7 +4654,7 @@ def _adaptive_padding_loop():
     while True:
         try:
             data = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/dvr/entry/grid?limit=200"
+                f"{dvr_base()}/api/dvr/entry/grid?limit=200"
                 f"&sort=start&dir=DESC", timeout=8).read())
             now = time.time()
             for e in data.get("entries", []):
@@ -5516,7 +5383,7 @@ async function toggleAutoSchedule() {
     have_slugs = set()
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500", timeout=6).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500", timeout=6).read())
         for e in data.get("entries", []):
             s = slugify(e.get("channelname") or "")
             if s:
@@ -5859,7 +5726,7 @@ async function toggleAutoSchedule() {
     upcoming_by_title = {}
     try:
         up = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
             timeout=10).read())
         uuid_to_slug = {}
         with cmap_lock:
@@ -8848,7 +8715,7 @@ def api_recording_window(slug):
     ch_uuid = info.get("uuid")
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=200&sort=start&dir=DESC",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=200&sort=start&dir=DESC",
             timeout=5).read())
     except Exception:
         return _cors(Response(json.dumps({"chain": []}),
@@ -8982,7 +8849,7 @@ def api_pi_context():
     recs = []
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500",
             timeout=5).read())
         recs = [e["uuid"] for e in data.get("entries", [])
                 if e.get("sched_status") == "recording"]
@@ -9201,7 +9068,7 @@ def record_event(event_id):
         "event_id": event_id, "config_uuid": "",
         "start_extra": 5, "stop_extra": 10,
     }).encode()
-    req = urllib.request.Request(f"{TVH_BASE}/api/dvr/entry/create_by_event",
+    req = urllib.request.Request(f"{dvr_base()}/api/dvr/entry/create_by_event",
                                   data=body, method="POST")
     try:
         res = urllib.request.urlopen(req, timeout=10).read().decode()
@@ -9564,7 +9431,7 @@ def record_series(event_id):
     # return early if already present.
     try:
         existing_grid = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/autorec/grid?limit=500",
+            f"{dvr_base()}/api/dvr/autorec/grid?limit=500",
             timeout=5).read())
         for er in existing_grid.get("entries", []):
             if (er.get("title") == title_regex
@@ -9585,7 +9452,7 @@ def record_series(event_id):
     body = urllib.parse.urlencode({"conf": json.dumps(conf)}).encode()
     try:
         req = urllib.request.Request(
-            f"{TVH_BASE}/api/dvr/autorec/create",
+            f"{dvr_base()}/api/dvr/autorec/create",
             data=body, method="POST")
         res = urllib.request.urlopen(req, timeout=10).read().decode()
         data = json.loads(res) if res else {}
@@ -9598,7 +9465,7 @@ def record_series(event_id):
         try:
             time.sleep(2)
             up = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=500",
+                f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
                 timeout=10).read())
             for e in up.get("entries", []):
                 if e.get("autorec") == autorec_uuid:
@@ -9640,7 +9507,7 @@ def cancel_series(autorec_uuid):
     cancelled = 0
     try:
         up = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
             timeout=10).read())
         for e in up.get("entries", []):
             if e.get("autorec") != autorec_uuid:
@@ -9666,7 +9533,7 @@ def cancel_series(autorec_uuid):
     try:
         body = urllib.parse.urlencode({"uuid": autorec_uuid}).encode()
         urllib.request.urlopen(
-            urllib.request.Request(f"{TVH_BASE}/api/idnode/delete",
+            urllib.request.Request(f"{dvr_base()}/api/idnode/delete",
                                     data=body, method="POST"),
             timeout=10).read()
     except Exception as e:
@@ -10029,7 +9896,7 @@ def _enrich_recordings_loop():
     while True:
         try:
             data = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/dvr/entry/grid?limit=500",
+                f"{dvr_base()}/api/dvr/entry/grid?limit=500",
                 timeout=10).read())
             now = time.time()
             seen = set()
@@ -10074,7 +9941,7 @@ def api_recording_watched(uuid):
                               "playcount": 1 if watched else 0})
     }).encode()
     try:
-        req = urllib.request.Request(f"{TVH_BASE}/api/idnode/save",
+        req = urllib.request.Request(f"{dvr_base()}/api/idnode/save",
                                       data=payload, method="POST")
         urllib.request.urlopen(req, timeout=5).read()
         return _cors(Response(json.dumps({"ok": True, "watched": watched}),
@@ -10094,7 +9961,7 @@ def _cleanup_watched_loop():
         try:
             cutoff = time.time() - WATCHED_AUTO_DELETE_DAYS * 86400
             d = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/dvr/entry/grid?limit=1000",
+                f"{dvr_base()}/api/dvr/entry/grid?limit=1000",
                 timeout=20).read())
             deleted = 0
             for e in d.get("entries", []):
@@ -10104,7 +9971,7 @@ def _cleanup_watched_loop():
                     try:
                         body = urllib.parse.urlencode({"uuid": e["uuid"]}).encode()
                         urllib.request.urlopen(urllib.request.Request(
-                            f"{TVH_BASE}/api/dvr/entry/remove",
+                            f"{dvr_base()}/api/dvr/entry/remove",
                             data=body, method="POST"),
                             timeout=10).read()
                         deleted += 1
@@ -10153,7 +10020,7 @@ def api_is_recording(slug):
     now_ts = int(time.time())
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=200",
+            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=200",
             timeout=6).read())
     except Exception:
         return _cors(Response(json.dumps({"active": False}),
@@ -10188,7 +10055,7 @@ def recordings_page():
         # sort=start DESC, future-scheduled entries crowded the 200
         # slots and completed ones got dropped from the page entirely.
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=600&sort=start&dir=DESC",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=600&sort=start&dir=DESC",
             timeout=10).read())
     except Exception as e:
         abort(502, f"tvheadend: {e}")
@@ -11520,7 +11387,7 @@ def _rec_source_path(uuid):
     recovered = HLS_DIR / f"_rec_{uuid}" / ".source-recovered.ts"
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=6).read())
         for e in data.get("entries", []):
             if e.get("uuid") == uuid:
@@ -11560,7 +11427,7 @@ def _refresh_rec_dvr_cache():
         return
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=6).read())
         slugs, titles = {}, {}
         for e in data.get("entries", []):
@@ -11869,7 +11736,7 @@ def _cohort_has_user_ads(uuid_str):
     if now - _cohort_cache["ts"] > _COHORT_CACHE_TTL_S:
         try:
             data = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+                f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
                 timeout=8).read())
         except Exception:
             return False
@@ -12115,7 +11982,7 @@ def _is_recording_in_progress(uuid):
     """
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500", timeout=5).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500", timeout=5).read())
         for e in data.get("entries", []):
             if e.get("uuid") == uuid:
                 return e.get("sched_status") == "recording"
@@ -12427,7 +12294,7 @@ def _mediathek_autorec_once():
     it up before expiry."""
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500",
             timeout=10).read())
     except Exception as e:
         print(f"mt-autorec fetch: {e}", flush=True)
@@ -12824,7 +12691,7 @@ def _rec_prewarm_once():
             uuid_start = {}
             try:
                 dvr = json.loads(urllib.request.urlopen(
-                    f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+                    f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
                     timeout=10).read())
                 for e in dvr.get("entries", []):
                     if e.get("uuid"):
@@ -12933,7 +12800,7 @@ def _rec_prewarm_once():
         # realistic single-corpus size; the response is small JSON
         # (~200 KB) so the over-fetch costs nothing.
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_finished?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid_finished?limit=500",
             timeout=10).read())
     except Exception:
         return
@@ -12946,7 +12813,7 @@ def _rec_prewarm_once():
     known_uuids = {e["uuid"] for e in data.get("entries", []) if e.get("uuid")}
     try:
         all_data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500", timeout=10).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500", timeout=10).read())
         for e in all_data.get("entries", []):
             if e.get("uuid"):
                 known_uuids.add(e["uuid"])
@@ -13173,7 +13040,7 @@ def _overrun_block(uuid, duration_s, deleted):
         return None
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=1000", timeout=5).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=1000", timeout=5).read())
     except Exception:
         return None
     entry = next((e for e in data.get("entries", [])
@@ -13582,7 +13449,7 @@ def api_learning_deletion_candidates():
     # Tvh DVR grid for filesize + start_real
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=10).read().decode("utf-8", errors="replace"))
         by_uuid = {e.get("uuid"): e for e in data.get("entries", [])
                    if e.get("uuid")}
@@ -13752,7 +13619,7 @@ def api_learning_plan():
     # 2. Pull already-scheduled DVR entries to dedupe
     try:
         dvr = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
             timeout=10).read())
         scheduled_keys = {(e.get("channel"), e.get("start", 0))
                           for e in dvr.get("entries", [])}
@@ -13763,7 +13630,7 @@ def api_learning_plan():
     dvr_config_uuid = ""
     try:
         cfgs = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/config/grid?limit=10", timeout=10).read())
+            f"{dvr_base()}/api/dvr/config/grid?limit=10", timeout=10).read())
         for c in cfgs.get("entries", []):
             if c.get("enabled"):
                 dvr_config_uuid = c.get("uuid", ""); break
@@ -13798,7 +13665,7 @@ def api_learning_plan():
             if dvr_config_uuid:
                 payload["config_uuid"] = dvr_config_uuid
             req = urllib.request.Request(
-                f"{TVH_BASE}/api/dvr/entry/create_by_event",
+                f"{dvr_base()}/api/dvr/entry/create_by_event",
                 data=urllib.parse.urlencode(payload).encode(),
                 method="POST")
             res = json.loads(urllib.request.urlopen(req, timeout=10).read())
@@ -13844,7 +13711,7 @@ def api_internal_thumbs_pending():
     in_progress = set()
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500",
             timeout=5).read())
         for e in data.get("entries", []):
             if e.get("sched_status") in ("recording", "scheduled"):
@@ -14525,7 +14392,7 @@ def api_recordings():
 
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000&sort=start&dir=DESC",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000&sort=start&dir=DESC",
             timeout=10).read())
     except Exception as e:
         abort(502, f"tvheadend: {e}")
@@ -14572,7 +14439,7 @@ def api_recording_single(uuid):
     host_url = request.host_url
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000&sort=start&dir=DESC",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000&sort=start&dir=DESC",
             timeout=10).read())
     except Exception as e:
         abort(502, f"tvheadend: {e}")
@@ -14605,7 +14472,7 @@ def api_recording_playposition(uuid):
         "node": json.dumps({"uuid": uuid, "playposition": pos})
     }).encode()
     try:
-        req = urllib.request.Request(f"{TVH_BASE}/api/idnode/save",
+        req = urllib.request.Request(f"{dvr_base()}/api/idnode/save",
                                       data=payload, method="POST")
         urllib.request.urlopen(req, timeout=5).read()
         return _cors(Response(json.dumps({"ok": True, "position": pos}),
@@ -15971,7 +15838,7 @@ def _find_duplicate_recordings(min_cluster_overlap=0.75,
     tvh_start = {}
     try:
         td = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=8).read())
         for e in td.get("entries", []):
             if e.get("uuid"):
@@ -16465,7 +16332,7 @@ def api_internal_drop_pi_source(uuid):
     {ok: False, reason} on any guard failure."""
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000", timeout=10).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000", timeout=10).read())
     except Exception as e:
         return _cors(Response(json.dumps({"ok": False,
             "reason": f"tvh unreachable: {e}"}),
@@ -16532,7 +16399,7 @@ def api_internal_cleanup_orphans():
     tvh_uuids = set()
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000", timeout=10).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000", timeout=10).read())
         for e in data.get("entries", []):
             if e.get("uuid"):
                 tvh_uuids.add(e["uuid"])
@@ -16576,7 +16443,7 @@ def _detect_pending_scan(marker_name):
     in_progress = set()
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500", timeout=5).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500", timeout=5).read())
         for e in data.get("entries", []):
             if e.get("sched_status") in ("recording", "scheduled"):
                 if e.get("uuid"):
@@ -16793,7 +16660,7 @@ def api_internal_detect_config(uuid):
     is_test_uuid = False
     try:
         dvr = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000&filter=%5B%7B%22field%22%3A%22uuid%22%2C%22type%22%3A%22string%22%2C%22value%22%3A%22{uuid}%22%7D%5D",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000&filter=%5B%7B%22field%22%3A%22uuid%22%2C%22type%22%3A%22string%22%2C%22value%22%3A%22{uuid}%22%7D%5D",
             timeout=5).read())
         for e in dvr.get("entries", []):
             if e.get("uuid") == uuid:
@@ -17235,7 +17102,7 @@ def api_internal_cutlist_uploaded(uuid):
         else:
             try:
                 data = json.loads(urllib.request.urlopen(
-                    f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+                    f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
                     timeout=6).read())
                 fn = next((e.get("filename") for e in data.get("entries", [])
                            if e.get("uuid") == uuid and e.get("filename")), None)
@@ -17283,7 +17150,7 @@ def api_internal_hls_pending():
     in_progress = set()
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500",
             timeout=5).read())
         for e in data.get("entries", []):
             if e.get("sched_status") in ("recording", "scheduled"):
@@ -17674,7 +17541,7 @@ def _dvr_entry_for_uuid(uuid_str):
     """Fetch one tvh DVR entry by uuid. Returns dict or None."""
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=8).read())
         for e in d.get("entries", []):
             if e.get("uuid") == uuid_str:
@@ -17700,7 +17567,7 @@ def _aggregate_per_show_drift():
     Suggested start_extra = ceil(max(|drift|) / 60) + 2  (=2 min buffer)."""
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=3000", timeout=10).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=3000", timeout=10).read())
     except Exception as e:
         print(f"[show-drift] tvh fetch err: {e}", flush=True)
         return {}
@@ -17823,7 +17690,7 @@ def _idnode_save(uuid_str, **fields):
         "node": json.dumps({"uuid": uuid_str, **fields})
     }).encode()
     req = urllib.request.Request(
-        f"{TVH_BASE}/api/idnode/save",
+        f"{dvr_base()}/api/idnode/save",
         data=body, method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"})
     return urllib.request.urlopen(req, timeout=10).read()
@@ -17836,7 +17703,7 @@ def _autorec_rules_matching_title(title):
     matches = []
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/autorec/grid?limit=500", timeout=8).read())
+            f"{dvr_base()}/api/dvr/autorec/grid?limit=500", timeout=8).read())
     except Exception as e:
         print(f"[show-drift] autorec fetch err: {e}", flush=True)
         return matches
@@ -17863,7 +17730,7 @@ def _scheduled_dvr_for_title(title):
     out = []
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000", timeout=8).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000", timeout=8).read())
     except Exception as e:
         print(f"[show-drift] dvr fetch err: {e}", flush=True)
         return out
@@ -18706,7 +18573,7 @@ def play_recording(uuid):
     title = "Aufnahme"
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000",
             timeout=6).read())
         for e in data.get("entries", []):
             if e.get("uuid") == uuid:
@@ -19726,7 +19593,7 @@ def delete_recording(uuid):
     state = ""
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000", timeout=5).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000", timeout=5).read())
         for e in data.get("entries", []):
             if e.get("uuid") == uuid:
                 state = e.get("sched_status", "")
@@ -19738,7 +19605,7 @@ def delete_recording(uuid):
         node = json.dumps({"uuid": uuid, "enabled": False})
         body_save = urllib.parse.urlencode({"node": node}).encode()
         try:
-            req = urllib.request.Request(f"{TVH_BASE}/api/idnode/save",
+            req = urllib.request.Request(f"{dvr_base()}/api/idnode/save",
                                           data=body_save, method="POST")
             urllib.request.urlopen(req, timeout=5).read()
         except Exception:
@@ -19756,7 +19623,7 @@ def delete_recording(uuid):
         node = json.dumps({"uuid": uuid, "enabled": False})
         body_save = urllib.parse.urlencode({"node": node}).encode()
         try:
-            req = urllib.request.Request(f"{TVH_BASE}/api/idnode/save",
+            req = urllib.request.Request(f"{dvr_base()}/api/idnode/save",
                                           data=body_save, method="POST")
             urllib.request.urlopen(req, timeout=5).read()
         except Exception:
@@ -19774,7 +19641,7 @@ def delete_recording(uuid):
         node = json.dumps({"uuid": uuid, "enabled": False})
         body_save = urllib.parse.urlencode({"node": node}).encode()
         try:
-            req = urllib.request.Request(f"{TVH_BASE}/api/idnode/save",
+            req = urllib.request.Request(f"{dvr_base()}/api/idnode/save",
                                           data=body_save, method="POST")
             urllib.request.urlopen(req, timeout=5).read()
         except Exception:
@@ -19931,7 +19798,7 @@ def _compute_tuner_conflicts(now_ts):
     """
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500", timeout=5).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500", timeout=5).read())
     except Exception:
         return {}
     # Channel-name → mux_uuid map (falls back to channel name itself
@@ -20037,7 +19904,7 @@ def active_dvr_count():
     count = 0
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_upcoming?limit=50",
+            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=50",
             timeout=4).read())
         horizon = int(now) + 600
         for e in data.get("entries", []):
@@ -21060,7 +20927,7 @@ def api_health():
     recs_completed = recs_scheduled = recs_watched = 0
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=500", timeout=5).read())
+            f"{dvr_base()}/api/dvr/entry/grid?limit=500", timeout=5).read())
         for e in d.get("entries", []):
             if "Completed" in (e.get("status") or ""):
                 recs_completed += 1
@@ -21113,7 +20980,7 @@ def _dvr_health():
     night."""
     try:
         d = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid_finished?limit=300",
+            f"{dvr_base()}/api/dvr/entry/grid_finished?limit=300",
             timeout=5).read())
     except Exception:
         return {"err": "tvh unreachable"}
@@ -21614,7 +21481,7 @@ def _bib_bucket_completed():
     → orphans-by-(title,channel). Returns dict[group_key, list[entry]]."""
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/dvr/entry/grid?limit=2000&sort=start&dir=DESC",
+            f"{dvr_base()}/api/dvr/entry/grid?limit=2000&sort=start&dir=DESC",
             timeout=10).read())
     except Exception as e:
         abort(502, f"tvheadend: {e}")
@@ -22477,7 +22344,6 @@ if __name__ == "__main__":
     threading.Thread(target=_app_idle_loop, daemon=True).start()
     threading.Thread(target=prewarm_codecs, daemon=True).start()
     threading.Thread(target=epg_snapshot_loop, daemon=True).start()
-    threading.Thread(target=xmltv_epg_refresh_loop, daemon=True).start()
     threading.Thread(target=_rec_prewarm_loop, daemon=True).start()
     # Default-pause the auto-scheduler on first install (= log file
     # absent → never ran here before). User opts-in via the toggle on
