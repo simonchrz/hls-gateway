@@ -11298,6 +11298,15 @@ def recordings_page():
 
 _rec_hls_lock = threading.Lock()
 _rec_hls_procs = {}  # uuid -> {"proc": Popen, "started": ts, "total_segs": int}
+
+# Concurrency cap for Pi-local HLS-remux ffmpegs. Without this, multiple
+# Mac-fallback timeouts + Kuckuck-app catchup-polls fire >8 ffmpegs in
+# parallel on 4 cores → load avg 80+, live recordings stutter, and the
+# whole Pi becomes unresponsive. With cap=2, throughput per ffmpeg is
+# ~50% of running solo, but no other services starve.
+_REMUX_MAX_PARALLEL = int(os.environ.get("REMUX_MAX_PARALLEL", "2"))
+_rec_hls_sema = threading.Semaphore(_REMUX_MAX_PARALLEL)
+_rec_hls_queued = set()  # uuids waiting on semaphore or running
 _rec_cskip_lock = threading.Lock()
 _rec_cskip_procs = {}  # uuid -> {"proc": Popen, "started": ts}
 
@@ -12077,83 +12086,107 @@ def _rec_hls_spawn(uuid):
 
 def _rec_hls_spawn_local(uuid):
     """Pi-local ffmpeg HLS-remux. Original `_rec_hls_spawn` body — same
-    behaviour, separated only so the offload path can fall back to it."""
+    behaviour, separated only so the offload path can fall back to it.
+
+    Semaphore-gated: caller returns the playlist path immediately; the
+    actual ffmpeg-spawn runs in a worker that blocks on _rec_hls_sema
+    so we never have more than _REMUX_MAX_PARALLEL ffmpegs alive at
+    once. While queued, the playlist file simply doesn't exist yet —
+    callers poll for it the same way they already do for the in-progress
+    recording case.
+    """
     out_dir = HLS_DIR / f"_rec_{uuid}"
     playlist = out_dir / "index.m3u8"
     with _rec_hls_lock:
         existing = _rec_hls_procs.get(uuid)
         if existing and existing["proc"].poll() is None:
             return playlist
+        if uuid in _rec_hls_queued:
+            return playlist
+        _rec_hls_queued.add(uuid)
         out_dir.mkdir(parents=True, exist_ok=True)
         try: playlist.unlink()
         except FileNotFoundError: pass
-        # Prefer the on-disk file over tvheadend's /dvrfile HTTP endpoint
-        # — ffmpeg 8.x's MPEG-2 decoder chokes on the HTTP stream (bails
-        # after 25× "Invalid frame dimensions 0x0" with zero output),
-        # while the same .ts file read directly decodes fine.
-        src = _rec_source_path(uuid) or f"{dvr_base()}/dvrfile/{uuid}"
-        # Probe video codec — copy if already H.264, transcode MPEG-2 etc.
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=codec_name", "-of",
-                 "default=nokey=1:noprint_wrappers=1", src],
-                capture_output=True, text=True, timeout=10)
-            vcodec = (probe.stdout or "").strip()
-        except Exception:
-            vcodec = ""
-        if vcodec in SAFE_VIDEO:
-            v_opts = ["-c:v", "copy"]
-        else:
-            v_opts = ["-vf",
-                      "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
-                      "-c:v", "libx264", "-preset", "ultrafast",
-                      "-profile:v", "main", "-pix_fmt", "yuv420p",
-                      "-g", "50"]
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-               "-i", src,
-               "-map", "0:v:0", "-map", "0:a:0",
-               *v_opts, "-c:a", "aac", "-b:a", "128k",
-               "-f", "hls",
-               "-hls_time", "6",
-               "-hls_list_size", "0",
-               "-hls_playlist_type", "event",
-               "-hls_base_url", f"/hls/_rec_{uuid}/",
-               "-hls_segment_filename", str(out_dir / "seg_%05d.ts"),
-               str(playlist)]
-        # Run remux with low CPU priority so live playback wins the
-        # scheduler if someone is watching at the same time.
-        cmd = ["nice", "-n", "15"] + cmd
-        proc = subprocess.Popen(cmd,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-        total = _rec_probe_total_segments(src)
+
+    def _gated_spawn():
+        with _rec_hls_sema:
+            try:
+                _rec_hls_spawn_local_inner(uuid, out_dir, playlist)
+            finally:
+                with _rec_hls_lock:
+                    _rec_hls_queued.discard(uuid)
+    threading.Thread(target=_gated_spawn, daemon=True).start()
+    return playlist
+
+
+def _rec_hls_spawn_local_inner(uuid, out_dir, playlist):
+    """Actual ffmpeg-spawn body — runs inside the semaphore-gated worker.
+    Blocks until ffmpeg exits so the semaphore is held for the entire
+    ffmpeg lifetime (= true concurrency cap)."""
+    # Prefer the on-disk file over tvheadend's /dvrfile HTTP endpoint
+    # — ffmpeg 8.x's MPEG-2 decoder chokes on the HTTP stream (bails
+    # after 25× "Invalid frame dimensions 0x0" with zero output),
+    # while the same .ts file read directly decodes fine.
+    src = _rec_source_path(uuid) or f"{dvr_base()}/dvrfile/{uuid}"
+    # Probe video codec — copy if already H.264, transcode MPEG-2 etc.
+    try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of",
+             "default=nokey=1:noprint_wrappers=1", src],
+            capture_output=True, text=True, timeout=10)
+        vcodec = (probe.stdout or "").strip()
+    except Exception:
+        vcodec = ""
+    if vcodec in SAFE_VIDEO:
+        v_opts = ["-c:v", "copy"]
+    else:
+        v_opts = ["-vf",
+                  "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1",
+                  "-c:v", "libx264", "-preset", "ultrafast",
+                  "-profile:v", "main", "-pix_fmt", "yuv420p",
+                  "-g", "50"]
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-i", src,
+           "-map", "0:v:0", "-map", "0:a:0",
+           *v_opts, "-c:a", "aac", "-b:a", "128k",
+           "-f", "hls",
+           "-hls_time", "6",
+           "-hls_list_size", "0",
+           "-hls_playlist_type", "event",
+           "-hls_base_url", f"/hls/_rec_{uuid}/",
+           "-hls_segment_filename", str(out_dir / "seg_%05d.ts"),
+           str(playlist)]
+    # Run remux with low CPU priority so live playback wins the
+    # scheduler if someone is watching at the same time.
+    cmd = ["nice", "-n", "15"] + cmd
+    proc = subprocess.Popen(cmd,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    total = _rec_probe_total_segments(src)
+    with _rec_hls_lock:
         _rec_hls_procs[uuid] = {"proc": proc, "started": time.time(),
                                  "total_segs": total}
-        print(f"[rec-hls {uuid[:8]}] ffmpeg spawned, ~{total} segments",
+    print(f"[rec-hls {uuid[:8]}] ffmpeg spawned, ~{total} segments",
+          flush=True)
+    # Kick off comskip right away — it reads the same .ts source
+    # (read-only) so it can run concurrently with the remux and
+    # commercial markers land on the scrub bar ~5 min sooner.
+    if not _mac_comskip_alive():
+        _rec_cskip_spawn(uuid)
+    # Block until ffmpeg exits — keeps the semaphore held.
+    proc.wait()
+    if proc.returncode != 0:
+        # Self-heal on crash: wipe the partial HLS directory so the next
+        # player request re-spawns from scratch. Without this we'd serve
+        # a truncated playlist + premature ENDLIST = instant-done empty
+        # clip.
+        print(f"[rec-hls {uuid[:8]}] ffmpeg failed "
+              f"(rc={proc.returncode}) — wiping {out_dir.name}",
               flush=True)
-        # Kick off comskip right away — it reads the same .ts source
-        # (read-only) so it can run concurrently with the remux and
-        # commercial markers land on the scrub bar ~5 min sooner.
-        # Skip when the Mac's tv-comskip.sh agent is alive: its
-        # M-series CPU finishes 4-10x faster than ours and the Pi has
-        # ffmpeg + 3-4 live transcodes already saturating its cores.
-        if not _mac_comskip_alive():
-            _rec_cskip_spawn(uuid)
-
-        def _after_ffmpeg():
-            proc.wait()
-            if proc.returncode != 0:
-                # Self-heal on crash: wipe the partial HLS directory so
-                # the next player request re-spawns from scratch. Without
-                # this we'd serve a truncated playlist + premature
-                # ENDLIST, which looks like an instant-done empty clip.
-                print(f"[rec-hls {uuid[:8]}] ffmpeg failed "
-                      f"(rc={proc.returncode}) — wiping {out_dir.name}",
-                      flush=True)
-                shutil.rmtree(out_dir, ignore_errors=True)
-                _rec_hls_procs.pop(uuid, None)
-        threading.Thread(target=_after_ffmpeg, daemon=True).start()
+        shutil.rmtree(out_dir, ignore_errors=True)
+        with _rec_hls_lock:
+            _rec_hls_procs.pop(uuid, None)
     return playlist
 
 
