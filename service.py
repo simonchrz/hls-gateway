@@ -12834,6 +12834,18 @@ def _rec_prewarm_once():
             if uuid in known_uuids: continue
             # Skip if any cleanup might race with our own work
             if uuid in _rec_hls_procs or uuid in _rec_cskip_procs: continue
+            # SAFETY: never delete a dir that contains user-labeled
+            # training data. Bug 2026-05-27: after the tvh→tv-receiver
+            # migration, tvh's hex UUIDs were rewritten to
+            # `dvr-<slug>-<epoch>`, but legacy `_rec_<hex-uuid>` dirs
+            # on disk still used the old hex UUIDs → known_uuids didn't
+            # match → 485 historical recordings (incl. 230 ads_user.json
+            # user-labels) got purged in one GC pass. Preserve any dir
+            # with manual labels even if its UUID isn't in the schedule
+            # store — those represent training data that can't be
+            # regenerated.
+            if (d / "ads_user.json").exists():
+                continue
             print(f"[rec-prewarm] gc orphan {uuid[:8]}", flush=True)
             shutil.rmtree(d, ignore_errors=True)
 
@@ -16433,6 +16445,10 @@ def api_internal_cleanup_orphans():
             if now - d.stat().st_mtime < 3600:
                 continue
         except Exception:
+            continue
+        # Same protection as the in-line GC at line ~12832: never delete
+        # dirs with user-labeled training data, even on UUID-mismatch.
+        if (d / "ads_user.json").exists():
             continue
         try:
             shutil.rmtree(d)
