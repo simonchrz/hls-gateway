@@ -2034,11 +2034,7 @@ def hls_playlist(slug):
     ch_dir = HLS_DIR / slug
     playlist_path = ch_dir / "index.m3u8"
     ua = request.headers.get("User-Agent", "")
-    min_segments, ua_class = _client_min_segments(ua)
-    # Temporary instrumentation (added 2026-05-27): verify that real
-    # Kuckuck-app + iPhone-Safari requests get routed to the right
-    # ua_class. Remove after a day of confirmation.
-    print(f"[hls-playlist] {slug} ua_class={ua_class} min={min_segments} ua={ua[:80]!r}", flush=True)
+    min_segments, _ = _client_min_segments(ua)
     deadline = time.time() + 30
     while time.time() < deadline:
         if playlist_path.exists() and playlist_path.stat().st_size > 100:
@@ -2079,8 +2075,7 @@ def hls_playlist_dvr(slug):
     ch_dir = HLS_DIR / slug
     playlist_path = ch_dir / "index.m3u8"
     ua = request.headers.get("User-Agent", "")
-    min_segments, ua_class = _client_min_segments(ua)
-    print(f"[dvr-playlist] {slug} ua_class={ua_class} min={min_segments} ua={ua[:80]!r}", flush=True)
+    min_segments, _ = _client_min_segments(ua)
     deadline = time.time() + 25
     while time.time() < deadline:
         if playlist_path.exists() and playlist_path.stat().st_size > 100:
