@@ -797,22 +797,23 @@ def slugify(name):
 
 
 def _migrate_favorites_from_tvh():
-    """One-time migration: read tvh's FAV_TAG_UUID-tagged channels and
-    write the resulting slug list to FAVORITES_FILE. Called only when the
-    file doesn't exist yet."""
+    """First-run favorites migration. Used to pull tvh's FAV_TAG_UUID-tagged
+    channels into FAVORITES_FILE. Tvh has been decommissioned (2026-05-27);
+    on a fresh install with no .favorites.json, ALL tv-receiver channels
+    become favorites and the user can curate via the UI."""
+    if FAVORITES_FILE.exists():
+        return []
     try:
-        data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/channel/grid?limit=500", timeout=10).read())
-        slugs = sorted({
-            slugify(e["name"]) for e in data.get("entries", [])
-            if FAV_TAG_UUID in e.get("tags", [])
-        })
+        with urllib.request.urlopen(
+            f"{TV_RECEIVER_BASE}/api/channels", timeout=5) as r:
+            data = json.load(r)
+        slugs = sorted(data.get("slugs") or [])
         FAVORITES_FILE.write_text(json.dumps({"slugs": slugs}, indent=2))
-        print(f"migrated {len(slugs)} favorites from tvh → {FAVORITES_FILE}",
-              flush=True)
+        print(f"seeded {FAVORITES_FILE} with all {len(slugs)} tv-receiver "
+              f"channels (= edit via UI to curate)", flush=True)
         return slugs
     except Exception as e:
-        print(f"favorites migration from tvh failed: {e}", flush=True)
+        print(f"favorites seed failed: {e}", flush=True)
         return []
 
 
@@ -860,40 +861,13 @@ def load_favorites():
     except Exception as e:
         print(f"tv-receiver /api/channels fetch failed: {e}", flush=True)
 
-    # Fall back to tvh for any favorite slug tv-receiver doesn't know.
-    # Skips entirely if all favorites are already covered.
+    # Any favorite slug not covered by tv-receiver's channels.json is just
+    # logged + skipped — tvh is gone, so there's no fallback to pull
+    # metadata from. The user can either add the slug to channels.json
+    # or drop it from .favorites.json.
     missing = fav_slugs - set(new_map.keys()) if fav_slugs else set()
     if missing:
-        try:
-            data = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/channel/grid?limit=500", timeout=10).read())
-            svc_to_mux = {}
-            try:
-                sdata = json.loads(urllib.request.urlopen(
-                    f"{TVH_BASE}/api/mpegts/service/grid?limit=2000",
-                    timeout=10).read())
-                for s in sdata.get("entries", []):
-                    svc_to_mux[s["uuid"]] = (
-                        s.get("multiplex_uuid", ""),
-                        s.get("multiplex", ""),
-                    )
-            except Exception as e:
-                print(f"tvh service grid fetch: {e}", flush=True)
-            for e in data.get("entries", []):
-                slug = slugify(e["name"])
-                if slug not in missing:
-                    continue
-                icon = e.get("icon_public_url") or ""
-                if icon and not icon.startswith("http"):
-                    icon = f"{HOST_URL}/{icon.lstrip('/')}"
-                svcs = e.get("services", [])
-                mux_uuid, mux_name = svc_to_mux.get(svcs[0], ("", "")) if svcs else ("", "")
-                new_map[slug] = {
-                    "name": e["name"], "uuid": e["uuid"], "icon": icon,
-                    "mux_uuid": mux_uuid, "mux_name": mux_name,
-                }
-        except Exception as e:
-            print(f"tvh channel grid fallback: {e}", flush=True)
+        print(f"favorites not in tv-receiver: {sorted(missing)}", flush=True)
 
     with cmap_lock:
         channel_map.clear()
@@ -908,13 +882,14 @@ def probe_codecs(slug):
     info = channel_map.get(slug)
     if not info:
         return None
-    tvh_url = f"{TVH_BASE}/stream/channel/{info['uuid']}?profile=pass"
+    # Probe via tv-receiver (= the only stream source post-tvh-removal).
+    src_url = f"{TV_RECEIVER_BASE}/stream/channel/{slug}?profile=pass"
     try:
         r = subprocess.run(
             ["ffprobe", "-v", "error",
              "-analyzeduration", "800000", "-probesize", "500000",
              "-show_entries", "stream=codec_type,codec_name",
-             "-of", "json", tvh_url],
+             "-of", "json", src_url],
             capture_output=True, timeout=15)
         if r.returncode != 0:
             print(f"[{slug}] probe returncode={r.returncode}", flush=True)
@@ -1160,14 +1135,12 @@ def start_ffmpeg(slug):
     else:
         audio_opts = ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
 
-    if slug in TV_RECEIVER_SLUGS:
-        # Bypass tvh entirely for this channel — tv-receiver speaks the
-        # same /stream/channel/<slug>?profile=pass URL shape but keyed on
-        # slug instead of uuid, and uses a native Go RTSP-client that
-        # doesn't suffer tvh's chronic packet-loss on FritzBox-SAT>IP.
-        tvh_url = f"{TV_RECEIVER_BASE}/stream/channel/{slug}?profile=pass"
-    else:
-        tvh_url = f"{TVH_BASE}/stream/channel/{info['uuid']}?profile=pass"
+    # Post-tvh-removal (2026-05-27): tv-receiver is the only stream source.
+    # If the slug isn't in TV_RECEIVER_SLUGS we can't get the stream at all.
+    if slug not in TV_RECEIVER_SLUGS:
+        print(f"[{slug}] cannot stream: not in tv-receiver's channels.json", flush=True)
+        return None
+    src_url = f"{TV_RECEIVER_BASE}/stream/channel/{slug}?profile=pass"
     # No `+discardcorrupt`: even in transcode-mode the h264 decoder needs
     # the initial in-stream SPS/PPS packets to sync. `+discardcorrupt` throws
     # them away before the demuxer can sync — decoder starves indefinitely
@@ -1181,7 +1154,7 @@ def start_ffmpeg(slug):
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "warning",
         *input_opts,
-        "-i", tvh_url,
+        "-i", src_url,
         "-map", "0:v:0", "-map", "0:a:0",
         *video_opts, *audio_opts,
         "-start_at_zero",
@@ -9035,7 +9008,7 @@ def api_internal_scheduled_events():
                "/api/dvr/entry/grid_recording"):
         try:
             data = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}{ep}?limit=500", timeout=5).read())
+                f"{dvr_base()}{ep}?limit=500", timeout=5).read())
             for e in data.get("entries", []):
                 eid = e.get("broadcast")
                 if eid is None:
@@ -9523,7 +9496,7 @@ def cancel_series(autorec_uuid):
                 try:
                     urllib.request.urlopen(
                         urllib.request.Request(
-                            f"{TVH_BASE}{ep}",
+                            f"{dvr_base()}{ep}",
                             data=body, method="POST"),
                         timeout=5).read()
                     cancelled += 1
@@ -9999,7 +9972,7 @@ def cancel_recording(uuid):
     last_err = None
     for ep in ("/api/dvr/entry/cancel", "/api/dvr/entry/remove"):
         try:
-            req = urllib.request.Request(f"{TVH_BASE}{ep}",
+            req = urllib.request.Request(f"{dvr_base()}{ep}",
                                           data=body, method="POST")
             urllib.request.urlopen(req, timeout=5).read()
             return _cors(Response(json.dumps({"ok": True}),
@@ -19651,7 +19624,7 @@ def delete_recording(uuid):
     else:
         for ep in ("/api/dvr/entry/cancel", "/api/dvr/entry/remove"):
             try:
-                req = urllib.request.Request(f"{TVH_BASE}{ep}",
+                req = urllib.request.Request(f"{dvr_base()}{ep}",
                                               data=body_uuid, method="POST")
                 urllib.request.urlopen(req, timeout=5).read()
             except Exception:
@@ -19768,12 +19741,15 @@ def tuner_status():
         return (_tuner_cache["used"], _tuner_cache["total"],
                 _tuner_cache.get("epggrab", 0))
     used, total, epg = None, TUNER_TOTAL, 0
+    # tv-receiver /healthz reports per-slot consumer counts; an active slot
+    # (= consumers>0) maps 1:1 to "tuner in use".
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/status/inputs", timeout=2).read())
-        entries = data.get("entries", [])
-        total = len(entries) or TUNER_TOTAL
-        used = sum(1 for e in entries if e.get("subs", 0) > 0)
+            f"{TV_RECEIVER_BASE}/healthz", timeout=2).read())
+        slots = data.get("slots", [])
+        if slots:
+            total = len(slots) or TUNER_TOTAL
+            used = sum(1 for s in slots if s.get("consumers", 0) > 0)
     except Exception:
         pass
     try:
@@ -20852,12 +20828,18 @@ def _satip_stream_health():
             out["status"] = worst
     except Exception:
         pass
+    # Tuner bandwidth: pull from tv-receiver /healthz (= total_bytes / age
+    # gives a rough running average per slot). Used downstream by the
+    # health UI to show "is RTL streaming at expected rate".
     try:
-        inputs = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/status/inputs", timeout=2).read())
-        out["tuner_bps_max"] = max(
-            (int(e.get("bps", 0) or 0) for e in inputs.get("entries", [])),
-            default=0)
+        hz = json.loads(urllib.request.urlopen(
+            f"{TV_RECEIVER_BASE}/healthz", timeout=2).read())
+        bps_per_slot = []
+        for s in hz.get("slots", []):
+            age = s.get("age_seconds", 0)
+            if age > 1 and s.get("total_bytes", 0) > 0:
+                bps_per_slot.append(int(s["total_bytes"] * 8 / age))
+        out["tuner_bps_max"] = max(bps_per_slot, default=0)
     except Exception:
         pass
     return out
@@ -21025,25 +21007,14 @@ def _stale_channels():
 
     The weekly /home/simon/dvbc_rescan_remap.py cron self-heals these,
     but the tile lets us see the gap between Vodafone's shift and
-    the next Sunday."""
-    try:
-        chans = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/channel/grid?limit=500", timeout=5).read())
-        svcs = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/mpegts/service/grid?limit=2000",
-            timeout=5).read())
-    except Exception:
-        return {"stale": [], "n": 0, "err": "tvh unreachable"}
-    enabled_uuids = {s["uuid"] for s in svcs.get("entries", [])
-                     if s.get("enabled", True)}
-    stale = []
-    for c in chans.get("entries", []):
-        s_uuids = c.get("services", [])
-        if not s_uuids:
-            continue
-        if not any(u in enabled_uuids for u in s_uuids):
-            stale.append(c.get("name", ""))
-    return {"stale": sorted(stale), "n": len(stale)}
+    the next Sunday.
+
+    Post-tvh removal (2026-05-27): this check relied on tvh's
+    auto-disabled-service detection. tv-receiver's channels.json is
+    hand-curated from the FritzBox m3u; Vodafone-shift detection now
+    happens at m3u-parse time (a removed channel just disappears).
+    We return an empty result so the dashboard tile still renders."""
+    return {"stale": [], "n": 0}
 
 
 HEALTH_HTML = """<!doctype html><html><head><meta charset="utf-8">

@@ -20,7 +20,11 @@ services:
       - ./tv-detect:/usr/local/bin/tv-detect:ro
       - ./libonnxruntime.so.1.25.0:/usr/lib/aarch64-linux-gnu/libonnxruntime.so:ro
     environment:
-      - TVH_BASE=http://raspberrypi5lan:9981
+      # TVH_BASE removed 2026-05-27 — tvh container is gone, tv-receiver
+      # is the TV backend. The Python const TVH_BASE still exists as a
+      # safety-net default (= dvr_base() returns it only if someone
+      # explicitly sets DVR_BACKEND=tvh, which would also need to bring
+      # the container back).
       - DVR_BACKEND=local
       - HOST_URL=https://raspberrypi5lan:8443
       - IDLE_TIMEOUT=30
