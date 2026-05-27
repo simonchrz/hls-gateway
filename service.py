@@ -3402,7 +3402,14 @@ def _learning_health():
         if len(recent) < THRESHOLD_RECS:
             continue
         all_zero = all(n == 0 for _, n, _, _ in recent)
-        all_high = all(rate > 0.60 for _, _, rate, dur in recent if dur > 0)
+        # `all_high` was previously `all(rate > 0.60 ... if dur > 0)` —
+        # which evaluates to True on an empty generator (= when ALL
+        # recent recordings have dur=0, e.g. because their index.m3u8
+        # is empty after a tar restore — incident 2026-05-27). Demand
+        # at least one valid-duration recording before claiming
+        # "high-ad-rate everywhere".
+        valid_rates = [rate for _, _, rate, dur in recent if dur > 0]
+        all_high = len(valid_rates) >= THRESHOLD_RECS and all(r > 0.60 for r in valid_rates)
         if all_zero or all_high:
             out["broken_channels"].append({
                 "slug": slug,
