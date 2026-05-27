@@ -3,6 +3,7 @@
 stops after idle timeout. Serves an HLS playlist with 2h DVR window."""
 import os, re, sys, signal, json, time, shutil, subprocess, threading, urllib.request, sqlite3
 import urllib.parse
+import datetime
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from flask import Flask, send_from_directory, send_file, abort, Response, request, redirect
@@ -134,6 +135,11 @@ STATS_FILE       = HLS_DIR / ".usage_stats.json"
 EPG_ARCHIVE_FILE = HLS_DIR / ".epg_archive.jsonl"
 ALWAYS_WARM_FILE = HLS_DIR / ".always_warm.json"
 FAVORITES_FILE   = HLS_DIR / ".favorites.json"  # {"slugs": [...]} — replaces tvh's FAV_TAG_UUID tag-based favorites
+EPG_XMLTV_URL    = os.environ.get(
+    "EPG_XMLTV_URL",
+    "https://epgshare01.online/epgshare01/epg_ripper_DE1.xml.gz")
+EPG_XMLTV_CACHE  = HLS_DIR / ".epg_xmltv.json"  # parsed {slug: [events]} — refreshed daily
+EPG_XMLTV_TTL    = 86400  # refetch once per day
 EPG_META_FILE    = HLS_DIR / ".epg_meta.json"  # tvmaze poster + rating cache
 USER_GROUPS_FILE = HLS_DIR / ".user-groups.json"  # manual recording groups (= cross-title franchise grouping like Rocky/Asterix)
 AUTO_SCHED_LOG   = HLS_DIR / ".tvd-models" / "auto-schedule-log.jsonl"  # one JSON-line per auto-schedule decision (success or skip)
@@ -2249,7 +2255,181 @@ def epg_snapshot_loop():
             print(f"snapshot loop: {e}", flush=True)
         time.sleep(EPG_SNAPSHOT_INTERVAL)
 
-def _fetch_channel_events(ch_uuid, now_ts, horizon_ts):
+# ---- XMLTV EPG ingest (replaces tvh /api/epg/events/grid) ----
+
+_xmltv_events = {}        # slug -> list of events sorted by start
+_xmltv_events_lock = threading.Lock()
+_xmltv_loaded_at = 0
+
+
+def _parse_xmltv_time(t):
+    """XMLTV time: 'YYYYMMDDHHMMSS +HHMM' → unix epoch."""
+    # strptime handles the offset format if we transform '+HHMM' → '+HH:MM'
+    # but pythons strptime '%z' accepts both, so direct works on 3.7+
+    return int(datetime.datetime.strptime(t, "%Y%m%d%H%M%S %z").timestamp())
+
+
+def _xmltv_slug_for(display_name, our_slugs_set):
+    """Map an XMLTV <display-name> to one of our channel slugs.
+    Tries: exact slugify match, then strip -hd/-sd suffix and match.
+    Returns a list (= one display-name can match multiple our-slugs when
+    we carry both SD + HD entries for the same channel)."""
+    candidate = slugify(display_name)
+    matches = []
+    for s in our_slugs_set:
+        if s == candidate:
+            matches.append(s)
+        elif re.sub(r'-(?:hd|sd)$', '', s) == candidate:
+            matches.append(s)
+    return matches
+
+
+def fetch_xmltv_epg(force=False):
+    """Download XMLTV from EPG_XMLTV_URL, parse, map XMLTV-channel-ids
+    to our channel slugs, write to EPG_XMLTV_CACHE. Refreshes at most
+    once per EPG_XMLTV_TTL unless force=True. Returns count of (slug,
+    event) pairs parsed."""
+    global _xmltv_loaded_at
+    now = time.time()
+    if not force and EPG_XMLTV_CACHE.exists():
+        age = now - EPG_XMLTV_CACHE.stat().st_mtime
+        if age < EPG_XMLTV_TTL:
+            return  # still fresh
+
+    try:
+        req = urllib.request.Request(EPG_XMLTV_URL,
+            headers={"User-Agent": "hls-gateway/1.0"})
+        raw = urllib.request.urlopen(req, timeout=60).read()
+        if EPG_XMLTV_URL.endswith(".gz"):
+            import gzip
+            raw = gzip.decompress(raw)
+    except Exception as e:
+        print(f"[xmltv-epg] fetch failed: {e}", flush=True)
+        return
+
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(raw)
+    except Exception as e:
+        print(f"[xmltv-epg] parse failed: {e}", flush=True)
+        return
+
+    # Build XMLTV-channel-id → [our_slugs] index.
+    with cmap_lock:
+        our_slugs = set(channel_map.keys())
+    # Also include the full tv-receiver slug set so the cache covers
+    # non-favorite channels too — keeps the data ready for autorec
+    # decisions that scan beyond the user's favorites.
+    our_slugs = our_slugs | TV_RECEIVER_SLUGS
+
+    xmltv_chan_to_slugs = {}
+    for ch in root.findall("channel"):
+        xmltv_id = ch.get("id")
+        if not xmltv_id:
+            continue
+        # Some XMLTV files have multiple <display-name> entries; try all.
+        for dn in ch.findall("display-name"):
+            txt = (dn.text or "").strip()
+            if not txt:
+                continue
+            matches = _xmltv_slug_for(txt, our_slugs)
+            if matches:
+                xmltv_chan_to_slugs[xmltv_id] = matches
+                break
+
+    # Parse programmes.
+    events_by_slug = {}
+    for prog in root.findall("programme"):
+        xmltv_id = prog.get("channel")
+        slugs = xmltv_chan_to_slugs.get(xmltv_id)
+        if not slugs:
+            continue
+        try:
+            start = _parse_xmltv_time(prog.get("start"))
+            stop  = _parse_xmltv_time(prog.get("stop"))
+        except Exception:
+            continue
+        title = (prog.findtext("title") or "?").strip()
+        subtitle = (prog.findtext("sub-title") or "").strip()
+        desc = (prog.findtext("desc") or "").strip()
+        # Use start-time as a stable event_id (= XMLTV doesn't carry IDs).
+        ev_id = start
+        for slug in slugs:
+            events_by_slug.setdefault(slug, []).append({
+                "start": start, "stop": stop,
+                "title": title, "subtitle": subtitle, "desc": desc,
+                "event_id": ev_id,
+            })
+
+    for slug in events_by_slug:
+        events_by_slug[slug].sort(key=lambda e: e["start"])
+
+    n_evs = sum(len(v) for v in events_by_slug.values())
+    print(f"[xmltv-epg] parsed {n_evs} events for {len(events_by_slug)}/"
+          f"{len(xmltv_chan_to_slugs)} matched channels", flush=True)
+
+    EPG_XMLTV_CACHE.write_text(json.dumps(events_by_slug, ensure_ascii=False))
+    with _xmltv_events_lock:
+        _xmltv_events.clear()
+        _xmltv_events.update(events_by_slug)
+        _xmltv_loaded_at = now
+
+
+def _load_xmltv_cache():
+    if not EPG_XMLTV_CACHE.exists():
+        return
+    try:
+        with _xmltv_events_lock:
+            _xmltv_events.clear()
+            _xmltv_events.update(json.loads(EPG_XMLTV_CACHE.read_text()))
+        print(f"[xmltv-epg] loaded cache with "
+              f"{sum(len(v) for v in _xmltv_events.values())} events "
+              f"across {len(_xmltv_events)} channels", flush=True)
+    except Exception as e:
+        print(f"[xmltv-epg] cache read failed: {e}", flush=True)
+
+
+def xmltv_epg_refresh_loop():
+    """Background thread: refresh XMLTV EPG once per day."""
+    _load_xmltv_cache()
+    # Force initial fetch if cache is empty
+    with _xmltv_events_lock:
+        empty = not _xmltv_events
+    if empty:
+        fetch_xmltv_epg(force=True)
+    while True:
+        time.sleep(3600)  # check hourly, fetch_xmltv_epg gates on TTL
+        try:
+            fetch_xmltv_epg()
+        except Exception as e:
+            print(f"[xmltv-epg] loop error: {e}", flush=True)
+
+
+def _fetch_channel_events(ch_uuid, now_ts, horizon_ts, slug=None):
+    """Returns events list for the channel within [now_ts, horizon_ts).
+
+    Slug-based XMLTV cache is consulted first; falls back to tvh's
+    /api/epg/events/grid (queried by UUID) when XMLTV has no data for
+    this slug."""
+    # Try local XMLTV cache (slug-keyed)
+    if slug:
+        with _xmltv_events_lock:
+            events = _xmltv_events.get(slug)
+        if events:
+            out = []
+            for e in events:
+                if e["stop"] <= now_ts or e["start"] >= horizon_ts:
+                    continue
+                out.append({
+                    "start": e["start"], "stop": e["stop"],
+                    "title": e.get("title", "?"),
+                    "subtitle": e.get("subtitle", ""),
+                    "event_id": e.get("event_id"),
+                })
+            if out:
+                return out
+
+    # Fallback: tvh's EPG via uuid
     try:
         params = urllib.parse.urlencode({
             "limit": 60, "channel": ch_uuid, "sort": "start",
@@ -2259,8 +2439,6 @@ def _fetch_channel_events(ch_uuid, now_ts, horizon_ts):
         out = []
         for e in data.get("entries", []):
             s = e.get("start", 0); stop = e.get("stop", 0)
-            # `now_ts` here is actually the window_start we were called
-            # with; filter events that ended before our window opens.
             if stop <= now_ts or s >= horizon_ts:
                 continue
             out.append({"start": s, "stop": stop,
@@ -2296,7 +2474,8 @@ def fetch_epg(window_before=900, window_after=6 * 3600, force=False):
         items = [(s, info) for s, info in channel_map.items()]
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(
-            lambda x: _fetch_channel_events(x[1]["uuid"], win_start, win_end),
+            lambda x: _fetch_channel_events(
+                x[1]["uuid"], win_start, win_end, slug=x[0]),
             items))
     events_by_slug = dict(zip([s for s, _ in items], results))
 
@@ -22298,6 +22477,7 @@ if __name__ == "__main__":
     threading.Thread(target=_app_idle_loop, daemon=True).start()
     threading.Thread(target=prewarm_codecs, daemon=True).start()
     threading.Thread(target=epg_snapshot_loop, daemon=True).start()
+    threading.Thread(target=xmltv_epg_refresh_loop, daemon=True).start()
     threading.Thread(target=_rec_prewarm_loop, daemon=True).start()
     # Default-pause the auto-scheduler on first install (= log file
     # absent → never ran here before). User opts-in via the toggle on
