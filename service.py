@@ -109,7 +109,9 @@ DVR_BACKEND    = os.environ.get("DVR_BACKEND", "tvh")
 
 
 def dvr_base():
-    """Base URL for DVR/autorec/idnode HTTP calls. Honors DVR_BACKEND."""
+    """Base URL for DVR/autorec/idnode/dvrfile + EPG-load HTTP calls.
+    Honors DVR_BACKEND. Anything that has a tvh-compat shim in tv-receiver
+    routes through here so a single flag flip swaps the whole backend."""
     if DVR_BACKEND == "local":
         return TV_RECEIVER_BASE
     return TVH_BASE
@@ -2278,7 +2280,7 @@ def _fetch_channel_events(ch_uuid, now_ts, horizon_ts, slug=None):
     # Try tv-receiver (slug-keyed, our local EPG store)
     if slug:
         try:
-            url = (f"{TV_RECEIVER_BASE}/api/epg/events/grid"
+            url = (f"{TV_RECEIVER_BASE}/api/epg/grid"
                    f"?slug={urllib.parse.quote(slug)}"
                    f"&from={now_ts}&to={horizon_ts}")
             data = json.loads(urllib.request.urlopen(url, timeout=4).read())
@@ -2301,7 +2303,7 @@ def _fetch_channel_events(ch_uuid, now_ts, horizon_ts, slug=None):
         params = urllib.parse.urlencode({
             "limit": 60, "channel": ch_uuid, "sort": "start",
         })
-        url = f"{TVH_BASE}/api/epg/events/grid?{params}"
+        url = f"{dvr_base()}/api/epg/events/grid?{params}"
         data = json.loads(urllib.request.urlopen(url, timeout=6).read())
         out = []
         for e in data.get("entries", []):
@@ -4325,7 +4327,7 @@ def _auto_schedule_run(max_n: int = AUTO_SCHED_MAX_PER_DAY,
         # field). Decode with errors=replace so one bad title doesn't
         # tank the whole scheduler run.
         raw = urllib.request.urlopen(
-            f"{TVH_BASE}/api/epg/events/grid?limit=1500",
+            f"{dvr_base()}/api/epg/events/grid?limit=1500",
             timeout=15).read()
         data = json.loads(raw.decode("utf-8", errors="replace"))
     except Exception as e:
@@ -8873,7 +8875,7 @@ def api_pi_context():
     except Exception:
         try:
             data = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/status/subscriptions", timeout=5).read())
+                f"{dvr_base()}/api/status/subscriptions", timeout=5).read())
             n_subs = len(data.get("entries", []))
         except Exception:
             pass
@@ -9210,7 +9212,7 @@ def api_mediathek_lookup(event_id):
     else:
         try:
             ev = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/epg/events/load?eventId={event_id}",
+                f"{dvr_base()}/api/epg/events/load?eventId={event_id}",
                 timeout=6).read())
             entry = (ev.get("entries") or [{}])[0]
             title = (entry.get("title") or "").strip()
@@ -9268,7 +9270,7 @@ def api_mediathek_schedule(event_id):
     else:
         try:
             ev = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/epg/events/load?eventId={event_id}",
+                f"{dvr_base()}/api/epg/events/load?eventId={event_id}",
                 timeout=6).read())
             entry = (ev.get("entries") or [{}])[0]
             ev_title = (entry.get("title") or "").strip()
@@ -9341,7 +9343,7 @@ def record_series(event_id):
     # Resolve event → title + channel
     try:
         ev = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/epg/events/load?eventId={event_id}",
+            f"{dvr_base()}/api/epg/events/load?eventId={event_id}",
             timeout=6).read())
         entry = (ev.get("entries") or [{}])[0]
         title = entry.get("title")
@@ -9402,7 +9404,7 @@ def record_series(event_id):
             params = urllib.parse.urlencode({
                 "limit": 100, "channel": ch_uuid, "title": title})
             grid = json.loads(urllib.request.urlopen(
-                f"{TVH_BASE}/api/epg/events/grid?{params}",
+                f"{dvr_base()}/api/epg/events/grid?{params}",
                 timeout=5).read())
             for ev in grid.get("entries", []):
                 s = ev.get("start", 0)
@@ -12064,7 +12066,7 @@ def _rec_hls_spawn_local(uuid):
         # — ffmpeg 8.x's MPEG-2 decoder chokes on the HTTP stream (bails
         # after 25× "Invalid frame dimensions 0x0" with zero output),
         # while the same .ts file read directly decodes fine.
-        src = _rec_source_path(uuid) or f"{TVH_BASE}/dvrfile/{uuid}"
+        src = _rec_source_path(uuid) or f"{dvr_base()}/dvrfile/{uuid}"
         # Probe video codec — copy if already H.264, transcode MPEG-2 etc.
         try:
             probe = subprocess.run(
@@ -13602,7 +13604,7 @@ def api_learning_plan():
     else:  # show / test-iou
         params = {"limit": 500, "title": key, "fulltext": 0, "sort": "start"}
     try:
-        epg_url = f"{TVH_BASE}/api/epg/events/grid?{urllib.parse.urlencode(params)}"
+        epg_url = f"{dvr_base()}/api/epg/events/grid?{urllib.parse.urlencode(params)}"
         epg = json.loads(urllib.request.urlopen(epg_url, timeout=10).read())
     except Exception as e:
         return Response(json.dumps({"ok": False, "error": f"epg query: {e}"}),
@@ -19776,7 +19778,7 @@ def tuner_status():
         pass
     try:
         subs = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/status/subscriptions", timeout=2).read())
+            f"{dvr_base()}/api/status/subscriptions", timeout=2).read())
         epg = sum(1 for e in subs.get("entries", [])
                   if e.get("title", "").lower() == "epggrab")
     except Exception:
@@ -19862,7 +19864,7 @@ def pinned_mux_info():
         name_to_slug = {info["name"]: s for s, info in channel_map.items()}
     try:
         data = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/status/subscriptions", timeout=2).read())
+            f"{dvr_base()}/api/status/subscriptions", timeout=2).read())
         for e in data.get("entries", []):
             slug = name_to_slug.get(e.get("channel", ""))
             if slug and slug in ALWAYS_WARM:
@@ -20820,7 +20822,7 @@ def _satip_stream_health():
     out = {"active_subs": [], "tuner_bps_max": 0, "status": "idle"}
     try:
         subs = json.loads(urllib.request.urlopen(
-            f"{TVH_BASE}/api/status/subscriptions", timeout=2).read())
+            f"{dvr_base()}/api/status/subscriptions", timeout=2).read())
         worst = "ok"
         for e in subs.get("entries", []):
             if not e.get("title", "").startswith("DVR:"):
