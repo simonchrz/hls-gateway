@@ -45,7 +45,7 @@ services:
       - HLS_OFFLOAD=mac
       - DETECT_OFFLOAD=mac
       - DETECT_FALLBACK_S=300
-      - HLS_FALLBACK_S=600
+      - HLS_FALLBACK_S=1800
       # Optional: TMDB v4 Bearer token for recordings-page EPG
       # enrichment (poster + rating). Picked up from .env next to
       # this file; falls back to TVmaze when unset.
