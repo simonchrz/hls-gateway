@@ -13218,7 +13218,17 @@ def recording_ads(uuid):
     else:
         auto = _rec_parse_comskip(out_dir)
         if not running:
-            if auto:
+            # Blackframe-snap refinement spawns ffmpeg (blackdetect) per
+            # ad-block. That violates the "all ffmpeg on the Mac" rule:
+            # the Pi 5 has no HW encoder, and worse, the /ads endpoint is
+            # polled by every client for every recording — uncached calls
+            # fan out into an unbounded ffmpeg storm (load 113 on
+            # 2026-05-28). tv-detect already applies --start-extend /
+            # --end-extend boundary padding on the Mac, so the primary
+            # boundaries are intact; the black-frame snap is a
+            # second-order refinement we drop on the Pi. Set
+            # BLACKFRAME_EXTEND=1 only on a host with a spare encoder.
+            if auto and os.environ.get("BLACKFRAME_EXTEND", "0") == "1":
                 src = _rec_source_path(uuid)
                 if src and Path(src).exists():
                     auto = _blackframe_extend_ads(
