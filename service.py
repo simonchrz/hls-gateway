@@ -12994,6 +12994,20 @@ def _rec_prewarm_once():
             if (now - last_spawn.get(("hls", uuid), 0)
                     < PREWARM_PER_UUID_COOLDOWN_S):
                 continue
+            # Source-existence guard: the schedule store keeps "completed"
+            # entries even after their .ts is deleted (disk eviction, or a
+            # manual delete that didn't prune the schedule). Without this
+            # check prewarm queues a remux every cooldown window, the Mac
+            # fetches /source, gets 404, fails — an endless loop that
+            # clogs the HLS queue (observed 2026-05-28). Skip queueing
+            # when the source is gone; the entry just stays HLS-less,
+            # harmless. A .source-recovered.ts in the HLS dir still
+            # counts as a valid source.
+            container_fn = _host_to_container(e.get("filename") or "")
+            recovered = out_dir / ".source-recovered.ts"
+            if not (container_fn and Path(container_fn).is_file()) \
+                    and not recovered.is_file():
+                continue
             # Pi-side eager remux — Mac daemon polls the marker
             # via /api/internal/hls-pending and POSTs back the
             # tarball. Each spawn is just a marker-write; the work
