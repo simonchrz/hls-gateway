@@ -22520,8 +22520,65 @@ def bibliothek_show(group_key):
     return Response(html, mimetype="text/html")
 
 
+def _fix_latin1_filenames():
+    """Rename any file/dir under HLS_DIR whose raw bytes are Latin-1
+    (ä/ö/ü/ß as single bytes) to proper UTF-8. After a Mac→Pi tar/rsync
+    restore the original tvh-era filenames land as Latin-1 bytes; this
+    container's UTF-8 fs-encoding then surfaces them as surrogateescape
+    strings (\\udcXX), and Flask crashes with
+    'utf-8 codec can't encode character \\udc..' whenever such a name
+    appears in a response (/learning, training-snapshot, etc.).
+
+    Operates entirely on bytes-paths, so it never has to decode a name
+    for the OS and works regardless of locale. Walks bottom-irrelevant
+    (renames as it goes, descends via the post-rename path). Runs once
+    at startup — cheap (a few hundred dir entries), and self-healing for
+    future restores so we don't have to remember the manual fix-script."""
+    root = str(HLS_DIR).encode("utf-8")
+
+    def is_utf8(b):
+        try:
+            b.decode("utf-8"); return True
+        except UnicodeDecodeError:
+            return False
+
+    fixed = [0]
+
+    def walk(dir_bytes):
+        try:
+            entries = os.listdir(dir_bytes)
+        except OSError:
+            return
+        for name in entries:
+            full = dir_bytes + b"/" + name
+            if not is_utf8(name):
+                try:
+                    new_name = name.decode("latin-1").encode("utf-8")
+                    new_full = dir_bytes + b"/" + new_name
+                    os.rename(full, new_full)
+                    fixed[0] += 1
+                    full = new_full
+                except OSError:
+                    pass
+            try:
+                if os.path.isdir(full):
+                    walk(full)
+            except OSError:
+                pass
+
+    try:
+        walk(root)
+    except Exception as e:
+        print(f"[startup] latin1-filename check failed: {e}", flush=True)
+        return
+    if fixed[0]:
+        print(f"[startup] renamed {fixed[0]} Latin-1 filename(s) → UTF-8",
+              flush=True)
+
+
 if __name__ == "__main__":
     HLS_DIR.mkdir(parents=True, exist_ok=True)
+    _fix_latin1_filenames()
     # tv-detect (which fully replaced comskip 2026-04-25) reads its
     # tuning from CLI flags, not from .ini files, so the legacy
     # COMSKIP_INI / COMSKIP_INI_PER_CHANNEL maps are no longer
