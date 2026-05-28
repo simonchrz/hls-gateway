@@ -11800,11 +11800,43 @@ def _cohort_has_user_ads(uuid_str):
     return cohort is not None and cohort in _cohort_cache["suspect"]
 
 
-def _rec_parse_comskip(out_dir):
+def _rec_playlist_duration(out_dir):
+    """Sum the HLS playlist's EXTINF lines → playable duration in
+    seconds (0.0 if no playlist). This is the length the client's
+    <video> element actually exposes, so it's the right denominator
+    for clamping ad-blocks + the comskip fps sanity-check."""
+    pl = out_dir / "index.m3u8"
+    if not pl.exists():
+        return 0.0
+    total = 0.0
+    try:
+        for ln in pl.read_text().splitlines():
+            if ln.startswith("#EXTINF:"):
+                try:
+                    total += float(ln.split(":", 1)[1].rstrip(","))
+                except Exception:
+                    pass
+    except Exception:
+        return 0.0
+    return total
+
+
+def _rec_parse_comskip(out_dir, true_duration_s=0.0):
     """Parse comskip's default .txt output → list of [start_s, stop_s].
     Adjacent blocks separated by a short sponsor card (≤25 s of "show")
     are merged — typical pattern on VOX/RTL/Pro7: Werbung · 15 s
-    Präsentation-Einblendung · Werbung · Sendungsstart."""
+    Präsentation-Einblendung · Werbung · Sendungsstart.
+
+    Interlaced fps correction: comskip reports the frame rate (e.g.
+    2500 = 25.00 fps) but on interlaced SD (720x576 50i: ProSieben,
+    RTL, …) it indexes FIELDS, so the frame numbers run at ~50/s while
+    "FRAMES AT" still says 2500. Converting field-indices with 25 fps
+    doubles every timestamp → blocks land past the recording end
+    (witnessed 2026-05-28: block at 2960-3452 s on a 2410 s recording,
+    the real ad was at ~1480-1726 s). When true_duration_s is known and
+    the comskip total-frame-count implies a materially higher rate than
+    the reported fps, trust the derived rate (total_frames /
+    true_duration_s) instead."""
     # Exclude sidecar .txt files. .logo.txt is the trained edge mask,
     # .trained.logo.txt is its tv-detect-side equivalent, .cskp.txt is
     # archived comskip output kept as historical reference for diffs,
@@ -11821,6 +11853,7 @@ def _rec_parse_comskip(out_dir):
     except Exception:
         return []
     fps = 25.0
+    total_frames = 0
     ads = []
     # Comskip's .txt occasionally writes a long run of NUL bytes
     # before the first frame-range line (witnessed on the Mac-side
@@ -11829,6 +11862,8 @@ def _rec_parse_comskip(out_dir):
     # find the LAST whitespace-separated frame pair via regex so the
     # leading garbage doesn't break parsing.
     line_re = re.compile(r"(\d+)\s+(\d+)\s*$")
+    # Header: "FILE PROCESSING COMPLETE  110437 FRAMES AT  2500"
+    hdr_re = re.compile(r"(\d+)\s+FRAMES AT\s+(\d+)")
     for line in lines:
         line = line.strip().replace("\x00", "")
         if not line or line.startswith("-"):
@@ -11840,6 +11875,24 @@ def _rec_parse_comskip(out_dir):
                     fps = 25.0
             except Exception:
                 pass
+            m = hdr_re.search(line)
+            if m:
+                try:
+                    total_frames = int(m.group(1))
+                except Exception:
+                    total_frames = 0
+            # Interlaced field-rate correction: if comskip's total frame
+            # count over the real duration implies a rate ≥1.5× the
+            # reported fps, it was counting fields — use the derived
+            # rate so field-indices convert to wall-clock correctly.
+            if true_duration_s and true_duration_s > 0 and total_frames > 0:
+                derived = total_frames / true_duration_s
+                if derived >= fps * 1.5:
+                    print(f"[comskip-parse] interlaced field-rate detected: "
+                          f"reported {fps:.2f} fps, derived {derived:.2f} "
+                          f"(={total_frames}f/{true_duration_s:.0f}s) — "
+                          f"using derived", flush=True)
+                    fps = derived
             continue
         m = line_re.search(line)
         if not m:
@@ -13208,15 +13261,19 @@ def recording_ads(uuid):
     txts = [p for p in out_dir.glob("*.txt")
             if not any(p.name.endswith(s) for s in SIDECAR)]
     txt_mtime = max((t.stat().st_mtime for t in txts), default=0)
+    # Compute playable duration up-front: the comskip parser needs it to
+    # sanity-check its frame→second conversion against interlaced
+    # field-rate inflation (see _rec_parse_comskip).
+    duration_s = _rec_playlist_duration(out_dir)
     if (not running and txts
             and ads_cache.exists()
             and ads_cache.stat().st_mtime >= txt_mtime):
         try:
             auto = json.loads(ads_cache.read_text())
         except Exception:
-            auto = _rec_parse_comskip(out_dir)
+            auto = _rec_parse_comskip(out_dir, duration_s)
     else:
-        auto = _rec_parse_comskip(out_dir)
+        auto = _rec_parse_comskip(out_dir, duration_s)
         if not running:
             # Blackframe-snap refinement spawns ffmpeg (blackdetect) per
             # ad-block. That violates the "all ffmpeg on the Mac" rule:
@@ -13258,25 +13315,10 @@ def recording_ads(uuid):
                     pass
 
     merged = _smart_merge_ads(auto, user_ads, deleted)
-    # Surface the playlist duration so the client can render ads
-    # immediately on the /ads response — without it, renderAds() bails
-    # at `if (D<=0) return` until v.duration is populated by the
-    # video element's loadedmetadata, which costs ~6 s of "blank
-    # scrub bar" after the page first paints. Parse the m3u8's
-    # EXTINF lines (already on disk, single read) — accurate even
-    # for variable-duration last segments.
-    duration_s = 0.0
-    pl = out_dir / "index.m3u8"
-    if pl.exists():
-        try:
-            for ln in pl.read_text().splitlines():
-                if ln.startswith("#EXTINF:"):
-                    try:
-                        duration_s += float(ln.split(":", 1)[1].rstrip(","))
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+    # duration_s already computed above from the HLS playlist EXTINF sum
+    # (needed early for the comskip fps sanity-check). The client uses it
+    # to render the scrub bar immediately instead of waiting ~6 s for the
+    # <video> loadedmetadata event.
     # Recording-overrun: tvh schedules with padding, so the .ts often
     # contains 30-600 s of NEXT show after the actual broadcast end.
     # The ad-detector can't tell — it sees continuous logo on the same
@@ -13290,6 +13332,27 @@ def recording_ads(uuid):
     overrun = _overrun_block(uuid, duration_s, deleted)
     if overrun:
         merged = merged + [overrun]
+    # Clamp blocks to the playable duration. comskip counts frames, and
+    # on interlaced SD (e.g. ProSieben 720x576 50i) the frame→second
+    # conversion uses the reported 25 fps while the real field cadence
+    # inflates the frame index — so a block can land past the actual
+    # recording length (witnessed 2026-05-28: block [2930,3471] on a
+    # 2410 s recording). A client's skipAd would then seek past the end
+    # of the video. Drop blocks that start at/after duration_s, clamp
+    # ends down to it. Only when duration_s is known (>0); a not-yet-
+    # remuxed playlist reports 0.0 and we leave blocks untouched.
+    if duration_s and duration_s > 0:
+        def _clamp(blocks):
+            out = []
+            for a, b in blocks:
+                if a >= duration_s:
+                    continue  # entirely past the end
+                out.append([a, min(b, duration_s)])
+            return out
+        merged = _clamp(merged)
+        if overrun:
+            overrun = ([overrun[0], min(overrun[1], duration_s)]
+                       if overrun[0] < duration_s else None)
     payload = {"ads": merged, "auto": auto, "user": user_ads,
                "deleted": deleted, "edited": edited, "running": running,
                "duration_s": round(duration_s, 3),
