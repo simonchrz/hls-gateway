@@ -45,7 +45,11 @@ services:
       - HLS_OFFLOAD=mac
       - DETECT_OFFLOAD=mac
       - DETECT_FALLBACK_S=300
-      - HLS_FALLBACK_S=1800
+      # 0 = Pi-local fallback DISABLED. Mac is the only ffmpeg host
+      # (Pi 5 has no HW encoder; libx264 on the Pi spikes load to 80+).
+      # Mac daemon runs HLS_PARALLEL=2 and is always-on, so the marker
+      # always gets picked up — just not instantly during ML bursts.
+      - HLS_FALLBACK_S=0
       # Optional: TMDB v4 Bearer token for recordings-page EPG
       # enrichment (poster + rating). Picked up from .env next to
       # this file; falls back to TVmaze when unset.

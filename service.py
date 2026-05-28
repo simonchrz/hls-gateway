@@ -12070,6 +12070,18 @@ def _rec_hls_spawn(uuid):
         # Fallback timer: if Mac doesn't deliver a playlist within
         # HLS_FALLBACK_S, take over locally so the user isn't stuck
         # waiting on a silent Mac.
+        #
+        # HLS_FALLBACK_S=0 DISABLES the Pi-local fallback entirely: the
+        # Mac is the only ffmpeg host, by design (= Pi 5 has no HW
+        # encoder, so libx264 on the Pi spikes load to 80+ and starves
+        # live recordings). The marker stays until the Mac delivers; the
+        # player keeps polling on the missing playlist. Trade-off: a
+        # genuinely-offline Mac means VOD playback of un-remuxed
+        # recordings never becomes available — acceptable since the Mac
+        # is always-on and the live + DVR paths don't depend on it.
+        if HLS_FALLBACK_S <= 0:
+            return playlist
+
         def _fallback():
             time.sleep(HLS_FALLBACK_S)
             if not playlist.exists() and marker.exists():
