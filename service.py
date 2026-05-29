@@ -19933,6 +19933,13 @@ def _channel_logo_url(slug, fallback, ext_priority=("svg", "png", "jpg")):
                 return f"{HOST_URL}/static/ch-logos/{slug}.{ext}"
     if not fallback:
         return ""
+    # tvh's imagecache (:9981) was decommissioned 2026-05-27 and tv-receiver
+    # has no equivalent, so any imagecache/<id> fallback is a dead URL. Return
+    # "" (-> client shows a placeholder) instead of a 404/502. The curated
+    # /static/ch-logos/<slug> override above still wins for channels that have
+    # one; only logo-less niche channels lose their (already-broken) icon.
+    if "imagecache" in fallback:
+        return ""
     if fallback.startswith("http"):
         return fallback
     return f"{HOST_URL}/{fallback.lstrip('/')}"
