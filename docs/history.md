@@ -268,12 +268,16 @@
   it, segment caching unlocks → solves the first-segment latency cleanly AND
   cuts repeat-segment YT load. Deeper/research, but the upstream lever.
 
-- **Smoke test for the Piped-Backend fork** (idea 2026-05-29). A lot landed
-  in the fork this session (semaphore, resolve budget, auto-WebEmbed
-  fallback, resolve-reuse, ReentrantLock) — all validated manually. A ~10-line
-  smoke (resolve a known video → master 200 + segment 206 + semaphore-503
-  behaviour) wired into the build would catch regressions. Small; insurance
-  now that the fork is complex enough that a silent break hurts.
+- ~~**Smoke test for the Piped-Backend fork**~~ **DONE 2026-05-29 (commit
+  `8c2729e` in simonchrz/Piped-Backend `ios-streaming-patches`).**
+  `smoke-test.sh` at the fork root: validates the resolve → synth-hls
+  master → variant → segment(206) chain AND the YT_RESOLVE_LIMITER (3
+  concurrent /streams → ≥1× 503). Run after `docker compose up`
+  (`bash ~/piped-backend-src/smoke-test.sh`, default video "Me at the zoo").
+  One-shot — does ~2-3 YT resolves, do NOT loop (re-triggers the throttle).
+  Verified green on the live backend (2×200+1×503, segment 206). A failure
+  during an active IP-block is expected (resolve can't complete), not a fork
+  regression.
 
 - ~~**Back up tv-receiver state (DVR schedules / autorec / channel map)**~~
   **DONE 2026-05-29.** `tv-backup-labels.sh` now also rsyncs
