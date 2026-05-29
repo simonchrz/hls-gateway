@@ -47,6 +47,25 @@
   USB handles 3-4 streams at ~100% CPU comfortably (4 cores
   available).
 
+## Done (shipped)
+
+- **tv-receiver: GOP-aligned replay for snappy live-TV channel change**
+  (shipped 2026-05-29, commit `bcc3ef6` in tv-receiver). App-dev idea:
+  keyframe-cache-on-join. tv-receiver already replayed the slot's last
+  ~3s ring to a newly-attached consumer (so the decoder finds a keyframe
+  without waiting for the next live IDR), but that replay began mid-GOP
+  — mpv demuxed ~1-1.5s of pre-keyframe junk first. `gopAlignReplay`
+  (keyframe.go) now trims the snapshot to start at the channel's most
+  recent video IDR (PUSI + adaptation random_access_indicator on the
+  PMT-derived video PID) with the latest PAT+PMT prepended → consumer's
+  first bytes are PAT→PMT→IDR. No CC-rewrite needed (cuts on whole
+  ring-element boundaries; only the 2 prepended PSI packets step CC,
+  which demuxers tolerate). Safe fallback to full blind replay when no
+  keyframe boundary is found, so no channel regresses. Verified live:
+  warm prosieben tap trimmed 4780→382 chunks (-92% pre-keyframe replay).
+  NOTE: only helps WARM muxes (ring must hold a keyframe); cold-tune
+  first-frame is still bounded by the next live IDR — prewarm covers that.
+
 ## Backlog (user mentioned, not built)
 
 - Always-warm list for some specific channels independent of viewing
