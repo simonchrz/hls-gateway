@@ -145,3 +145,22 @@
   URL. Curated `/static/ch-logos/<slug>` overrides still win (all 24 favorite
   channels have one). Optional future nicety (not done, marginal): a generated
   initials-placeholder or a real icon source for niche channels.
+
+- **synth-hls: first-segment warmup (cold-tap latency)** (app-dev finding
+  2026-05-29, after the resolve-reuse win brought cold-tap to ~1.7s). The
+  biggest remaining server-side chunk is the **first segment fetch ~846ms**:
+  piped-proxy (:8882) synchronously pulls the first googlevideo chunk when
+  the player requests it. A naive prefetch/warmup does NOT help and is
+  HARMFUL here: piped-proxy is a streaming proxy with NO cache (the cached
+  yt-proxy is deliberately bypassed — `rewriteToYtProxy` returns the URL
+  unchanged because googlevideo per-video-throttles the yt-proxy upstream),
+  so a warmup fetch + the player's fetch = TWO googlevideo fetches of the
+  same chunk = extra YT load + the same IP-block risk we just tamed. Proper
+  version needs a **first-chunk cache** in piped-backend: at variant-build
+  (the Pi already knows the first segment URL + byte-range) async-pull the
+  first chunk ONCE into a small cache, point the first segment URL at a
+  Pi-served endpoint that reads it, so it's a single fetch started early and
+  overlapped with master/variant/mpv-start (~30ms) — the 846ms then drops
+  out of perceived latency. Moderate effort; gated on getting caching right
+  without re-triggering the throttle. (The other remaining ~320ms is VT
+  first-frame decode — app/decode-side, not server.)
