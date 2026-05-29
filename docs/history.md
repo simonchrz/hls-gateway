@@ -261,14 +261,22 @@
   Deployed + smoke-verified (limiter 2×200+1×503 intact).** Resolve-isolation
   is now complete across all player-resolve routes.
 
-- **Investigate the yt-proxy throttle (root cause of the first-segment
-  problem)** (idea 2026-05-29). The cached yt-proxy is bypassed because
-  googlevideo per-video-throttles it (`rewriteToYtProxy` is a no-op), which
-  is *why* there's no segment caching → the 846ms first-segment + why the
-  warmup item above is hard. If we find WHY the yt-proxy gets throttled
-  (URL pattern? missing header/cpn vs the working piped-proxy path?) and fix
-  it, segment caching unlocks → solves the first-segment latency cleanly AND
-  cuts repeat-segment YT load. Deeper/research, but the upstream lever.
+- ~~**Investigate the yt-proxy throttle (root cause)**~~ **ROOT CAUSE FOUND
+  2026-05-29 (empirical).** Measured a real `c=ANDROID_VR` googlevideo URL
+  (has cpn, NO `n`/`ratebypass`): bounded **Range requests stream at
+  ~1.4 MB/s, 10 rapid same-cpn ranges all 206 (no 403, no count-cap)**, but
+  the **no-Range full GET is throttled to ~31 KB/s** (googlevideo anti-
+  download). `YtProxyHandlers` does exactly the no-Range pull — its doc
+  comment ("no Range → avoids per-cpn rate-limit") is INVERTED, and the
+  per-range-403 it warns about does NOT occur on current ANDROID_VR URLs.
+  At 31 KB/s < bitrate the cache fills slower than realtime → useless →
+  that's why `rewriteToYtProxy` was disabled. See memory
+  `googlevideo_throttle_noRange_not_cpn`. **FIX (now actionable, not yet
+  built):** rewrite `startDownloader` to fetch sequential BOUNDED range
+  chunks (`Range: bytes=s-e`) instead of one no-Range pull → full speed →
+  re-enable `rewriteToYtProxy` → segment caching returns → unlocks the
+  first-segment pre-fetch (846 ms) + cuts repeat-segment YT load. Extend
+  smoke-test with a yt-proxy segment 206 at full speed.
 
 - ~~**Smoke test for the Piped-Backend fork**~~ **DONE 2026-05-29 (commit
   `8c2729e` in simonchrz/Piped-Backend `ios-streaming-patches`).**
