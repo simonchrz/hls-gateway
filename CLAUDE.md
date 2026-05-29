@@ -28,9 +28,11 @@ Sister repos:
   2026-05-27.
 - `simonchrz/tv-detect` — Go ad-detection binary + Python ML pipeline
   (`scripts/train-head.py`) + the Mac worker daemon (`daemon/`,
-  consolidated here from tvheadend/mac-daemon on 2026-05-29)
-- `simonchrz/tvheadend` — DEAD backend; survives as a docs +
-  config-snapshot archive only (name no longer matches anything running)
+  consolidated here from the old tvheadend repo on 2026-05-29)
+
+(The `simonchrz/tvheadend` repo was deleted 2026-05-29 — tvheadend had
+been decommissioned. Its still-relevant docs live in `docs/` here now;
+its tvh-config snapshots + dead comskip/DVB-C ops were dropped.)
 
 ## Where the code runs
 
@@ -210,7 +212,7 @@ Key internal endpoints:
 - `GET /api/internal/training-snapshot` — bulk metadata dump for
   `tv-train-head.py` (replaces SMB-mount glob)
 
-Full architecture documented in `simonchrz/tvheadend/docs/mac-handlers.md`.
+Full architecture documented in [`docs/mac-handlers.md`](docs/mac-handlers.md).
 
 ## Bibliothek + Series (consumer-side)
 
