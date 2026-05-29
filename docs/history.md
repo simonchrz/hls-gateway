@@ -101,16 +101,23 @@
      `/healthcheck` + non-YT routes never starve. Validated without YouTube
      (3rd concurrent resolve → 503 in 0.5s; `/healthcheck` 200 in 1.6ms in
      parallel). A YT IP-block can no longer take the whole backend down.
-  2. **Fail-fast resolve timeouts** on the still-unbounded throttle-facing
-     calls: the WebEmbed fallback request `getWebEmbeddedPlayerResponseModern`
-     in `YoutubeStreamExtractor.java`, and the HEAD throttle-checks
-     (`isStreamsThrottled` clen/2 HEAD) in `StreamHandlers` +
-     `SynthHlsHandlers`. (The Android cascade is already bounded: 6s ->
-     WebEmbed auto-fallback, commit 9bd53f5f7 in
-     simonchrz/NewPipeExtractor `ios-innertube-fallback`.)
-  NOTE: neither makes videos PLAY under a hard IP block (only IP recovery
-  does) — they keep the backend alive + fail fast. Root cause of the block
-  is resolve VOLUME (backend tuned for minimal resolves; pre-warm doubled
-  it, since reverted). See project memory `piped_synth_hls_youtube` +
-  `synth_hls_cache_ttl_cpn_throttle` for build process + cpn/pre-warm
-  pitfalls. Don't test by hammering the same resolve — it re-triggers the block.
+  2. **Fail-fast resolve timeouts** — turned out to be ALREADY in place
+     (checked 2026-05-29): the Downloader bounds every YT call at 10s
+     (`DownloaderImpl:164`), the throttle HEAD-checks are 2s/3s
+     (`StreamHandlers` + `SynthHlsHandlers` `isStreamsThrottled`), the
+     Android cascade is 6s (commit 9bd53f5f7), and the WebEmbed fallback
+     goes through the Downloader (10s). So no infinite hang — worst case is
+     a few sequential bounded calls, and the semaphore caps concurrency.
+     Tightening the global Downloader 10s further is whole-backend risk for
+     marginal gain — left alone.
+  3. ~~**De-pin virtual threads**~~ **DONE 2026-05-29 (commit ffd99ef):**
+     `SynthHlsHandlers` resolve section converted from `synchronized
+     (streamsCache)` to a `ReentrantLock` — synchronized + blocking I/O pins
+     the vthread carrier (Java 21); ReentrantLock lets it unmount during the
+     resolve. (StreamHandlers had no synchronized around its resolve.)
+  NOTE: none of this makes videos PLAY under a hard IP block (only IP
+  recovery does) — they keep the backend alive + fail fast. Root cause of
+  the block is resolve VOLUME (backend tuned for minimal resolves; pre-warm
+  doubled it, since reverted). See project memory `piped_synth_hls_youtube`
+  + `synth_hls_cache_ttl_cpn_throttle`. Don't test by hammering the same
+  resolve — it re-triggers the block.
