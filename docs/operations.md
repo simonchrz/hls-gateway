@@ -43,6 +43,20 @@ walks the per-channel `<slug>/.ffmpeg.pid` files, reattaches the live
 processes via the `AdoptedProcess` Popen-stub, and the always-warm
 loop continues like nothing happened.
 
+**Deploy must write `service.py` IN PLACE — same inode.** The compose
+bind-mounts a single file (`./service.py:/app/service.py`), and Docker
+binds it by inode at container start. `scp` (and `cp`, `rsync --inplace`)
+truncate + rewrite the existing file → same inode → the container sees
+the new bytes, and SIGHUP then re-reads them. But anything that REPLACES
+the file with a new inode — `git reset --hard`, `git checkout`,
+`rsync` without `--inplace`, editors with atomic-save — leaves the
+container pinned to the old (now-orphaned) inode: it keeps running the
+old code, and SIGHUP can't fix it because it re-reads the same stale
+mount. The only recovery is then a `compose up -d` recreate (= buffer
+reset). So: deploy code via `scp`/`cp`/`rsync --inplace` + SIGHUP; use
+git only for version control, never as the deploy step. (Learned the
+hard way 2026-05-29.)
+
 When `compose restart` is unavoidable (image rebuild, env-var changes,
 dependency upgrades): warn the user that ~2 h of live cache will reset,
 then confirm.

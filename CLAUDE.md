@@ -112,6 +112,8 @@ become 5 MB junk).
 | `_show_poster_url`, `_recording_app_schema` | helpers | shared schema for /api/recordings + /api/series |
 | `_bib_bucket_completed`, `_bib_tiles_data` | ~20300 | bibliothek grouping + tile-building (reused by /api/series) |
 | `/api/series` | ~20420 | aggregated per-show JSON for app |
+| `/healthz` | ~21073 | lightweight liveness probe (no SMB reads); mirrors tv-receiver shape `{"ok",...}`, 200/503 on 2 s backend reachability. The compose `healthcheck` treats ANY HTTP reply as alive (so a backend-down 503 doesn't flap the container). |
+| `/api/health` | ~21100 | rich dashboard health (SMB heartbeats, per-channel scan freshness, CPU/mem/disk) |
 | `/bibliothek` HTML page | ~20440 | web-UI tile grid (still its own renderer; tile-data helper extracted but page not refactored to use it yet) |
 | `/learning` HTML page | ~4344 | active-learning + per-show drift + failure-mode analyse |
 | `_file_watcher_loop`, `_self_exec` | ~20230 | hot-reload via SIGHUP |
