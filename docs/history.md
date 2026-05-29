@@ -255,9 +255,11 @@
   and capping ~15 browse routes on a shared Semaphore(2) would cause frequent
   503s during normal browsing (UX cost for speculative gain). `/sponsors` +
   `/dearrow` are external APIs (not YouTube) — irrelevant. Only genuine
-  remnant: `/clips` (resolveClipId = a player-resolve, same risk) — fold into
-  the next piped-backend build rather than a dedicated rebuild for one rare
-  route.
+  remnant was `/clips` (resolveClipId = a player-resolve, same risk) — **DONE
+  2026-05-29 (commit `153d690` in simonchrz/Piped-Backend): wrapped in the
+  same ytResolveAcquire()→503 + withResolveBudget(12s) + release pattern.
+  Deployed + smoke-verified (limiter 2×200+1×503 intact).** Resolve-isolation
+  is now complete across all player-resolve routes.
 
 - **Investigate the yt-proxy throttle (root cause of the first-segment
   problem)** (idea 2026-05-29). The cached yt-proxy is bypassed because
