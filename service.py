@@ -1239,6 +1239,61 @@ def ensure_running(slug):
         stop_channel(v)
 
 
+def _compute_prewarm_neighbors(slug):
+    """Adjacency-aware prewarm targets for the channel `slug`.
+
+    The favourite channels are surfed in channel_map order (= tv-receiver
+    channels.json order, grouped by mux). Channels sharing the current
+    channel's mux are already warm (PID-union) — switching to them is
+    instant. The cold points are the mux *boundaries*. So we return the
+    first channel in EACH direction that sits on a different mux: those are
+    the muxes the viewer hits if they keep surfing up/down. Pre-warming one
+    representative per neighbouring mux holds that mux tuned + fills its
+    replay ring with keyframes → the next switch GOP-aligns instantly.
+
+    Mid-block both neighbours are same-mux → we look past them to the block
+    edge, so we still warm the *next* mux without spending a tuner on the
+    already-warm current one. Returns 0-2 slugs."""
+    order = list(channel_map.keys())
+    if slug not in order:
+        return []
+    i = order.index(slug)
+    cur_mux = channel_map[slug].get("mux_uuid")
+    picks = []
+    # First different-mux channel walking toward the end of the list.
+    for j in range(i + 1, len(order)):
+        if channel_map[order[j]].get("mux_uuid") != cur_mux:
+            picks.append(order[j])
+            break
+    # First different-mux channel walking toward the start.
+    for j in range(i - 1, -1, -1):
+        if channel_map[order[j]].get("mux_uuid") != cur_mux:
+            picks.append(order[j])
+            break
+    return picks
+
+
+def _post_prewarm(slugs):
+    """Push the desired prewarm set to tv-receiver (replace semantics).
+    Best-effort: prewarm is a latency optimisation, never block a switch on
+    it."""
+    try:
+        req = urllib.request.Request(
+            f"{TV_RECEIVER_BASE}/api/prewarm",
+            data=json.dumps({"slugs": slugs}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST")
+        urllib.request.urlopen(req, timeout=3).read()
+    except Exception as e:
+        print(f"[prewarm] post {slugs} failed: {e}", flush=True)
+
+
+def _spawn_prewarm_update(slug):
+    """Recompute + push neighbour prewarm targets off the switch hot-path."""
+    targets = _compute_prewarm_neighbors(slug) if slug else []
+    threading.Thread(target=_post_prewarm, args=(targets,), daemon=True).start()
+
+
 def _app_track(slug):
     """Mark `slug` as the active external-app session. Switching from
     one slug to another immediately stops the previous one (unless it
@@ -1251,11 +1306,20 @@ def _app_track(slug):
     (mediathek-passthru for ARD/ZDF/etc)."""
     now = time.time()
     prev = None
+    changed = False
     with _app_lock:
-        if _app_session["slug"] and _app_session["slug"] != slug:
-            prev = _app_session["slug"]
+        old = _app_session["slug"]
+        if old != slug:
+            changed = True
+        if old and old != slug:
+            prev = old
         _app_session["slug"] = slug
         _app_session["last_seen"] = now if slug else 0.0
+    # On an actual switch, update the adjacency-aware prewarm set so the
+    # muxes the viewer is most likely to surf into next are kept warm
+    # (= GOP-aligned instant channel-change). slug=None clears it.
+    if changed:
+        _spawn_prewarm_update(slug)
     if prev and prev not in ALWAYS_WARM:
         # Only stop if no fresh non-app activity in last 10s — covers
         # the case where the web UI is also watching the prev channel.
