@@ -164,3 +164,36 @@
   out of perceived latency. Moderate effort; gated on getting caching right
   without re-triggering the throttle. (The other remaining ~320ms is VT
   first-frame decode — app/decode-side, not server.)
+
+- **Proactive monitoring / alerting** (idea 2026-05-29; still collecting).
+  This session was all reactive firefighting — disk at 90%, the YouTube
+  IP-block, slow recording downloads were each only found once someone
+  noticed. Building blocks already exist: `/healthz` on both services, the
+  `/` dashboard, `/learning`, and Home Assistant runs on the Pi anyway.
+  Idea: a few HA sensors + an automation that PUSHES before it hurts —
+  disk `>85%`, piped-backend unhealthy, a DVR recording failed, detect-drain
+  backing up. Reuses HA (no new system). Turns "user notices it broke" into
+  "system warns first". Highest real-world value.
+
+- **Extend YT-resolve isolation to ALL resolve routes** (idea 2026-05-29).
+  The `Semaphore` only guards `/streams` + `/synth-hls`. But `/channel`,
+  `/c`, `/user`, `/clips`, `/sponsors`, `/dearrow` also resolve YouTube and
+  can starve carriers under an IP-block if the app browses/searches during
+  one. Put them on a shared resolve semaphore — cheap, low-risk, closes the
+  gap left by the playback-only cap (commit 9e3b624).
+
+- **Investigate the yt-proxy throttle (root cause of the first-segment
+  problem)** (idea 2026-05-29). The cached yt-proxy is bypassed because
+  googlevideo per-video-throttles it (`rewriteToYtProxy` is a no-op), which
+  is *why* there's no segment caching → the 846ms first-segment + why the
+  warmup item above is hard. If we find WHY the yt-proxy gets throttled
+  (URL pattern? missing header/cpn vs the working piped-proxy path?) and fix
+  it, segment caching unlocks → solves the first-segment latency cleanly AND
+  cuts repeat-segment YT load. Deeper/research, but the upstream lever.
+
+- **Smoke test for the Piped-Backend fork** (idea 2026-05-29). A lot landed
+  in the fork this session (semaphore, resolve budget, auto-WebEmbed
+  fallback, resolve-reuse, ReentrantLock) — all validated manually. A ~10-line
+  smoke (resolve a known video → master 200 + segment 206 + semaphore-503
+  behaviour) wired into the build would catch regressions. Small; insurance
+  now that the fork is complex enough that a silent break hurts.
