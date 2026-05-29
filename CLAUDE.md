@@ -175,8 +175,24 @@ The Pi's heavy work (HLS remux, thumbs, ad-detect) is offloaded to
 `~/bin/tv-thumbs-daemon.py` on the Mac via HTTP-only protocol (NO SMB,
 TCC restrictions kill it). Pi writes `.requested` marker files;
 daemon polls `/api/internal/{thumbs,hls,detect}-pending`, runs work
-locally, PUTs results back. Pi-fallback timer (60–600 s) takes over
-if Mac is silent.
+locally, PUTs results back.
+
+**Pi-local HLS fallback is DISABLED (`HLS_FALLBACK_S=0`, 2026-05-28).**
+The Pi 5 has no HW H.264 encoder; any local libx264 remux spikes load
+to 80+ and starves live recordings, so the Mac is the sole ffmpeg host.
+Markers wait until the Mac picks them up (daemon `HLS_PARALLEL=2`,
+always-on). Related guards added the same day:
+- `REMUX_MAX_PARALLEL=2` semaphore caps Pi-local remux IF ever
+  re-enabled.
+- Prewarm skips queueing a remux when the source `.ts` is missing
+  (dead schedule entries → endless 404 loop otherwise).
+- Blackframe-snap in `/ads` is gated behind `BLACKFRAME_EXTEND=1`
+  (default off) — it spawned an unbounded ffmpeg blackdetect storm per
+  uncached poll.
+- comskip-parser derives true fps from frame-count/duration for
+  interlaced SD (field-rate inflation placed ad blocks past the
+  recording end); `/ads` also clamps blocks to playable duration.
+- Latin-1 filenames auto-renamed → UTF-8 at startup.
 
 Key internal endpoints:
 - `GET /api/internal/{thumbs,hls,detect}-pending` — work queue
