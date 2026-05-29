@@ -25,17 +25,30 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 
 	# Tvheadend imagecache (channel logos) — proxy so we avoid mixed content
 	handle /imagecache/* {
-		reverse_proxy localhost:9981
+		reverse_proxy 127.0.0.1:9981
 		header Cache-Control "public, max-age=86400"
 	}
 
 	# Tvheadend recording playback (supports HTTP Range for seeking)
 	handle /dvrfile/* {
-		reverse_proxy localhost:9981
+		reverse_proxy 127.0.0.1:9981
+	}
+
+	# Static recording segments straight from SSD (bypasses Flask) — mirror of @hls_ts.
+	# On disk: /mnt/tv/hls/_rec_<uuid>/seg_NNNNN.ts ; requested as /recording/<uuid>/seg_NNNNN.ts
+	# index.m3u8 deliberately NOT matched — stays on Flask (on-demand packaging + ad markers).
+	@rec_ts path_regexp recseg ^/recording/([^/]+)/(seg_[0-9]+\.ts)$
+	handle @rec_ts {
+		rewrite * /hls/_rec_{re.recseg.1}/{re.recseg.2}
+		root * /mnt/tv
+		file_server
+		header Content-Type "video/mp2t"
+		header Cache-Control "public, max-age=3600"
+		header Access-Control-Allow-Origin "*"
 	}
 
 	# Everything else → Flask gateway
-	reverse_proxy localhost:8080 {
+	reverse_proxy 127.0.0.1:8080 {
 		header_up Host {host}
 		header_up X-Real-IP {remote_host}
 	}
