@@ -101,15 +101,14 @@
      `/healthcheck` + non-YT routes never starve. Validated without YouTube
      (3rd concurrent resolve → 503 in 0.5s; `/healthcheck` 200 in 1.6ms in
      parallel). A YT IP-block can no longer take the whole backend down.
-  2. **Fail-fast resolve timeouts** — turned out to be ALREADY in place
-     (checked 2026-05-29): the Downloader bounds every YT call at 10s
-     (`DownloaderImpl:164`), the throttle HEAD-checks are 2s/3s
-     (`StreamHandlers` + `SynthHlsHandlers` `isStreamsThrottled`), the
-     Android cascade is 6s (commit 9bd53f5f7), and the WebEmbed fallback
-     goes through the Downloader (10s). So no infinite hang — worst case is
-     a few sequential bounded calls, and the semaphore caps concurrency.
-     Tightening the global Downloader 10s further is whole-backend risk for
-     marginal gain — left alone.
+  2. ~~**Fail-fast resolve timeouts**~~ **DONE 2026-05-29 (commit 75b0c57):**
+     per-call timeouts already existed (Downloader 10s, HEAD 2s/3s, Android
+     cascade 6s), but a throttled resolve STACKS the sequential fallbacks
+     (Android 6s + WebEmbed ~20s + HEAD 5s + force-WebEmbed retry ~20s) into
+     ~30-50s. Added a total per-resolve budget in `ServerLauncher` (12s) that
+     wraps `streamsResponse` + the SynthHls playlist builds; on timeout it
+     cancels + throws so the handler returns a fast error and frees the
+     semaphore slot. Normal resolves ~2-4s, well under budget (verified).
   3. ~~**De-pin virtual threads**~~ **DONE 2026-05-29 (commit ffd99ef):**
      `SynthHlsHandlers` resolve section converted from `synchronized
      (streamsCache)` to a `ReentrantLock` — synchronized + blocking I/O pins
