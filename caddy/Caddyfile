@@ -23,15 +23,17 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 		header Access-Control-Allow-Origin "*"
 	}
 
-	# Tvheadend imagecache (channel logos) — proxy so we avoid mixed content
-	handle /imagecache/* {
-		reverse_proxy 127.0.0.1:9981
-		header Cache-Control "public, max-age=86400"
-	}
+	# /imagecache removed 2026-05-29: it was tvh's channel-logo cache on :9981,
+	# which no longer exists. tv-receiver has no imagecache; logos come from
+	# /static/ch-logos. The tvh-imagecache fallback the gateway still emits for
+	# logo-less channels is dead either way (needs a gateway-side fix — see
+	# backlog). Requests now fall through to Flask (404) instead of 502 against
+	# a dead backend.
 
-	# Tvheadend recording playback (supports HTTP Range for seeking)
+	# Recording file stream (tvh-compat, Range support) — tv-receiver on :9983
+	# (was tvh :9981, decommissioned 2026-05-27).
 	handle /dvrfile/* {
-		reverse_proxy 127.0.0.1:9981
+		reverse_proxy 127.0.0.1:9983
 	}
 
 	# Static recording segments straight from SSD (bypasses Flask) — mirror of @hls_ts.

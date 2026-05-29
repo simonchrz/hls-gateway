@@ -137,3 +137,13 @@
   with tv-receiver: fan-out, per-channel ffmpeg), HTML pages last. Big
   lift, no concrete trigger yet. Near-term sub-item already noted in that
   memory: add a `/healthz` route — DONE 2026-05-29 (it exists now).
+
+- **Channel-logo fallback still points at dead tvh imagecache** (found
+  2026-05-29). For channels without a `/static/ch-logos/<slug>` override,
+  the gateway emits an `imagecache/<id>` fallback URL — but tvh's
+  imagecache (`:9981`) is gone and tv-receiver has none, so those logos
+  are dead (the Caddy `/imagecache/*` route was removed; requests now 404
+  instead of 502). Fix is gateway-side: drop the imagecache fallback and
+  use a real source (tv-receiver channel icons, or a generated placeholder,
+  or just require a static logo). Cosmetic — only affects logo-less niche
+  channels. Low priority.
