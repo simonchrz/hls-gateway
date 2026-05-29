@@ -16550,20 +16550,26 @@ def api_internal_drop_pi_source(uuid):
         return _cors(Response(json.dumps({"ok": False,
             "reason": "no HLS-VOD on disk — playback would break"}),
             mimetype="application/json", status=409))
-    # Translate container path → host path (= docker mount /mnt/tv → /recordings)
+    # Map the recording's absolute path to THIS container's view. tv-receiver
+    # stores host paths like /mnt/tv/<title>/...ts; the gateway mounts host
+    # /mnt/tv at /recordings (see docker-compose), so /mnt/tv/ → /recordings/
+    # for the stat + unlink. (Legacy tvh entries already used /recordings/ —
+    # the replace is then a no-op.) Before 2026-05-29 this translated the
+    # WRONG way (/recordings/→/mnt/tv/) and checked a path the container can't
+    # see → every drop returned "file already gone" → 330 GB never reclaimed.
     fname = entry.get("filename") or ""
     if not fname:
         return _cors(Response(json.dumps({"ok": False,
-            "reason": "no filename in tvh entry (= already dedup'd?)"}),
+            "reason": "no filename in DVR entry (= already dedup'd?)"}),
             mimetype="application/json"))
-    host_path = Path(fname.replace("/recordings/", "/mnt/tv/", 1))
-    if not host_path.is_file():
+    cpath = Path(fname.replace("/mnt/tv/", "/recordings/", 1))
+    if not cpath.is_file():
         return _cors(Response(json.dumps({"ok": False,
-            "reason": f"file already gone: {host_path}"}),
+            "reason": f"file already gone: {cpath}"}),
             mimetype="application/json"))
     try:
-        sz = host_path.stat().st_size
-        host_path.unlink()
+        sz = cpath.stat().st_size
+        cpath.unlink()
     except Exception as e:
         return _cors(Response(json.dumps({"ok": False,
             "reason": f"delete failed: {e}"}),
