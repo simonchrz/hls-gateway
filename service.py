@@ -12769,6 +12769,12 @@ def api_live_ads_stream(slug):
     Each connection holds a waitress worker thread for its lifetime;
     with the default pool of 4 we can hold 4 concurrent player tabs
     before /api/* requests start queuing. Plenty for home use."""
+    # The app re-subscribes to this SSE on every channel switch, so it is
+    # our reliable per-switch hook — the raw-TS player path does not hit the
+    # m3u8 handler that calls _app_track. Refresh the adjacency-aware
+    # prewarm set for the now-current channel (fire-and-forget, idempotent
+    # so SSE reconnects on the same slug are harmless).
+    _spawn_prewarm_update(slug)
     def gen():
         last_mtime = -1
         last_payload = None
