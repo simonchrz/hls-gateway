@@ -81,3 +81,22 @@
   measurable. Estimated effort if/when revived: 6-8h
   (Go feature in `signals/`, train-head.py wiring, daemon CLI flag,
   head retraining + smoke).
+
+- **YouTube synth-hls: fail-fast timeouts on the throttle-facing calls**
+  (deferred 2026-05-29, do when the IP isn't being throttled). Under a
+  googlevideo per-IP throttle a `/streams` / synth-hls resolve hangs ~22s
+  (player spinner gives up). The NPE-fork Android cascade is already
+  bounded (6s -> WebEmbed auto-fallback, commit 9bd53f5f7 in
+  simonchrz/NewPipeExtractor `ios-innertube-fallback`), but two
+  throttle-facing calls still have no tight timeout and can hang:
+  (a) the WebEmbed fallback request `getWebEmbeddedPlayerResponseModern`
+  in `YoutubeStreamExtractor.java`, and (b) the HEAD throttle-checks
+  (`isStreamsThrottled` clen/2 HEAD) in `StreamHandlers` + `SynthHlsHandlers`.
+  Add bounded timeouts so a throttled resolve fails fast (clean error)
+  instead of a 22s hang. NOTE: this is a UX/fail-fast improvement only —
+  it does NOT make videos play under a hard IP block (only IP recovery,
+  ~1-12h, does that). Root cause of the block is resolve VOLUME (the YT
+  backend is tuned for minimal resolves); see project memory
+  `piped_synth_hls_youtube` + `synth_hls_cache_ttl_cpn_throttle` for the
+  build process and the cpn/pre-warm pitfalls. Don't test by hammering
+  the same resolve — that re-triggers the block.
