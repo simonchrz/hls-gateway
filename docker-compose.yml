@@ -44,7 +44,9 @@ services:
       - THUMBS_OFFLOAD=mac
       - HLS_OFFLOAD=mac
       - DETECT_OFFLOAD=mac
-      - DETECT_FALLBACK_S=300
+      # 0 = Pi-local detect-fallback DISABLED. Mac is the sole detect host
+      # (Pi-local path silently omitted the NN anyway). Set 2026-05-29.
+      - DETECT_FALLBACK_S=0
       # 0 = Pi-local fallback DISABLED. Mac is the only ffmpeg host
       # (Pi 5 has no HW encoder; libx264 on the Pi spikes load to 80+).
       # Mac daemon runs HLS_PARALLEL=2 and is always-on, so the marker
