@@ -5,7 +5,9 @@ suggesting changes.
 
 ## What this is
 
-Flask-based HLS gateway that sits in front of tvheadend on a Raspberry
+Flask-based HLS gateway that sits in front of **tv-receiver** (the Go
+TV backend on `:9983` that replaced tvheadend on 2026-05-27 — repo
+`simonchrz/tv-receiver`) on a Raspberry
 Pi 5 + bridges live TV + recorded DVR + Mediathek streams to clients
 (iOS app, web UI, mpv, AVPlayer, browsers). The single `service.py`
 (~21 000 lines) hosts the entire orchestration:
@@ -21,11 +23,14 @@ Pi 5 + bridges live TV + recorded DVR + Mediathek streams to clients
   `/api/app/live/<slug>/*`)
 
 Sister repos:
-- `simonchrz/tvheadend` — tvh config snapshots + mac-daemon scripts +
-  ops docs (was hls-gateway's parent until 2026-05-22 when hls-gateway
-  graduated to its own repo)
-- `simonchrz/tv-detect` — Go ad-detection binary + Python train-head.py
-  ML pipeline
+- `simonchrz/tv-receiver` — the live TV backend (Go, `:9983`): tuner/
+  SAT>IP, EPG, DVR, autorec + a tvh-compat HTTP shim. Replaced tvheadend
+  2026-05-27.
+- `simonchrz/tv-detect` — Go ad-detection binary + Python ML pipeline
+  (`scripts/train-head.py`) + the Mac worker daemon (`daemon/`,
+  consolidated here from tvheadend/mac-daemon on 2026-05-29)
+- `simonchrz/tvheadend` — DEAD backend; survives as a docs +
+  config-snapshot archive only (name no longer matches anything running)
 
 ## Where the code runs
 
@@ -37,7 +42,7 @@ authoritative edits happen on Pi.
 
 Three-process pipeline per service:
 ```
-Caddy :8443 (TLS)  →  Flask :8080 (service.py)  →  tvheadend :9981
+Caddy :8443 (TLS)  →  Flask :8080 (service.py)  →  tv-receiver :9983
 ```
 plus ffmpeg subprocesses spawned per active channel (live HLS feed)
 and per recording (HLS-VOD remux, but the recording-side mostly
@@ -345,11 +350,15 @@ rsvg-convert -h 192 -o <slug>.png <slug>.svg
   filesystem. Recording dirs: `_rec_<uuid>/` with `index.m3u8`,
   `seg_*.ts`, `<title>.txt` (cutlist), `ads_user.json`, `ads.json`,
   `thumbs/t<NNNNN>.jpg`.
-- **`TVH_BASE`** = `http://raspberrypi5lan:9981` — tvheadend HTTP API.
-  Most metadata queries go through `/api/dvr/entry/grid*` or
-  `/api/idnode/save`. tvh's grid endpoints used: `grid` (all),
-  `grid_finished` (completed only), `grid_upcoming` (scheduled +
-  recording).
+- **DVR/EPG backend routing** — `dvr_base()` honors `DVR_BACKEND`.
+  Compose sets **`DVR_BACKEND=local`** so all `/api/dvr/*`, `/api/autorec`,
+  `/api/idnode/save`, `/dvrfile/*` + EPG-load calls route to
+  **`TV_RECEIVER_BASE`** (`http://localhost:9983`, tv-receiver's
+  tvh-compat shim). The legacy `TVH_BASE` const (default
+  `http://localhost:9981`) still exists for `DVR_BACKEND=tvh` rollback
+  but is unused now — the tvh container is gone. The grid endpoints used:
+  `grid` (all), `grid_finished` (completed only), `grid_upcoming`
+  (scheduled + recording) — tv-receiver mirrors these shapes.
 - **CORS**: all `/api/*` routes pass through `_cors()` which sets
   `Access-Control-Allow-Origin: *`. Don't return raw `Response()`
   from new app endpoints — wrap.
