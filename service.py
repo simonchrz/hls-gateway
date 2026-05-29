@@ -1288,9 +1288,21 @@ def _post_prewarm(slugs):
         print(f"[prewarm] post {slugs} failed: {e}", flush=True)
 
 
+# Baseline mux kept warm even when the app is idle (= the busiest favourite
+# mux, 546). Preserves the old `-prewarm vox` always-warm behaviour so the
+# first app-open after idle isn't a cold tune; dynamic neighbours stack on
+# top. Env-overridable (comma list); empty string = no baseline.
+PREWARM_BASE = [s for s in os.environ.get("PREWARM_BASE", "vox").split(",") if s.strip()]
+
+
 def _spawn_prewarm_update(slug):
-    """Recompute + push neighbour prewarm targets off the switch hot-path."""
-    targets = _compute_prewarm_neighbors(slug) if slug else []
+    """Recompute + push baseline + neighbour prewarm targets off the switch
+    hot-path. Idle (slug=None) still posts the baseline."""
+    targets = list(PREWARM_BASE)
+    if slug:
+        for n in _compute_prewarm_neighbors(slug):
+            if n not in targets:
+                targets.append(n)
     threading.Thread(target=_post_prewarm, args=(targets,), daemon=True).start()
 
 
