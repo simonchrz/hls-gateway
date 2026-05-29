@@ -85,6 +85,33 @@
   (all the redundant copies were migrated-from-tvh; native autorec copy
   kept). Consecutive same-title episodes (≥~20 min apart) are NOT merged.
 
+- **tv-receiver: green-bottom-on-join fix** (shipped 2026-05-29, commit
+  `4718499`). Switching channels showed ~1-2s of green macroblocks in the
+  bottom of the picture on many channels. Cause: gopAlignReplay started at
+  the MOST RECENT keyframe = often the IDR still being transmitted at attach
+  (only leading slices in the ring) → shallow-buffer decoder renders a
+  half-complete IDR → bottom rows never fill. Fix: replay from the
+  SECOND-to-last keyframe (guaranteed complete: whole AU + full trailing GOP
+  already in the ring). Ring bumped 6→12 MB so ≥2 keyframes are reliably
+  cached; replay stays bounded to ~2 GOPs by the trim. Verified: the
+  green-causing `error while decoding MB` count dropped to 0 on
+  comedy-central/kabel-eins/prosieben (remaining `missing/mmco` are harmless
+  discarded open-GOP B-frames, not green).
+
+- **Adjacency-aware dynamic prewarm (A+B)** (shipped 2026-05-29; tv-receiver
+  `5ba1955`, hls-gateway `d7fb38e`). (A) channels.json regrouped by mux so
+  the favourites surf-order is mux-contiguous (favourite cold-crossings
+  17→7). (B) on every channel switch hls-gateway computes the first
+  different-mux favourite in each surf direction and POSTs them to the new
+  tv-receiver `POST /api/prewarm` (runtime-updatable Prewarmer), keeping the
+  ≤2 neighbouring muxes warm + their replay rings populated for instant
+  GOP-aligned switching. Mid-block neighbours are same-mux (already warm) →
+  0 extra tuner; only block edges spend one. Baseline `PREWARM_BASE=vox`
+  keeps mux 546 warm even when idle. Hook is the live-ads SSE subscribe (the
+  raw-TS player path doesn't hit the m3u8 handler). DEPENDENCY: the app must
+  surf in /api/channels order for the neighbour computation to match.
+  Verified end-to-end (SSE prosieben→[vox,comedy-central], nitro→[vox,3sat-hd]).
+
 ## Backlog (user mentioned, not built)
 
 - Always-warm list for some specific channels independent of viewing
