@@ -197,3 +197,31 @@
   smoke (resolve a known video → master 200 + segment 206 + semaphore-503
   behaviour) wired into the build would catch regressions. Small; insurance
   now that the fork is complex enough that a silent break hurts.
+
+- **Back up tv-receiver state (DVR schedules / autorec / channel map)** (idea
+  2026-05-29; HIGH value, cheap). Confirmed gap: `tv-backup-labels.sh` backs
+  up the ML labels (ads_user.json + models) but NOT tv-receiver's state in
+  `~/bin/`: `dvr.json` (~480 schedules + the uuid→recording registry!),
+  `autorec.json` (19 rules), `channels.json` (95-channel slug→freq/pids map).
+  No script backs these up. If the NVMe dies (it has a history — APST hang,
+  memory `nvme_controller_hang_recovery`), all schedules + autorec rules + the
+  recording mapping are lost (cf. the migrator wipe that cost 485 dirs). Add
+  them to the existing daily backup (or a small rsync to the labels-backup
+  repo). `epg.json` (3.9 MB) is regenerable from the XMLTV feed → skip/optional.
+
+- **Recording-failure detection + alert** (idea 2026-05-29). DVR recordings
+  can come out as junk (~5 MB, stuck subs / mux re-tune mid-record — see
+  memories `never_restart_tvh_during_recordings`, `stuck_warm_channel_kills_dvr`).
+  A check that flags recordings far below expected size/duration → alert
+  (+ optional autorec re-schedule). Feeds the monitoring idea above.
+
+- **Episode summaries / auto-chapters from whisper transcripts** (idea
+  2026-05-29; nice-to-have, speculative). The `whisper.json` transcripts
+  already exist (FTS5 search + ad-classify). Could generate per-episode
+  summaries or chapter markers from them — `video_analyzer_reference` memory
+  noted this as a future template. Feature, not infra.
+
+- **Housekeeping: prune dead dirs/config** (idea 2026-05-29; low value).
+  Stale leftovers: `~/MPVKit-fork-stale`, `~/go2rtc` (container not running),
+  the disabled tvh-config-snapshot remnants, and the `~/caddy/Caddyfile` vs
+  git-copy drift (a deploy-from-git or drift-check would prevent recurrence).
