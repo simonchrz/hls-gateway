@@ -165,22 +165,34 @@
   without re-triggering the throttle. (The other remaining ~320ms is VT
   first-frame decode — app/decode-side, not server.)
 
-- **Proactive monitoring / alerting** (idea 2026-05-29; still collecting).
-  This session was all reactive firefighting — disk at 90%, the YouTube
-  IP-block, slow recording downloads were each only found once someone
-  noticed. Building blocks already exist: `/healthz` on both services, the
-  `/` dashboard, `/learning`, and Home Assistant runs on the Pi anyway.
-  Idea: a few HA sensors + an automation that PUSHES before it hurts —
-  disk `>85%`, piped-backend unhealthy, a DVR recording failed, detect-drain
-  backing up. Reuses HA (no new system). Turns "user notices it broke" into
-  "system warns first". Highest real-world value.
+- ~~**Proactive monitoring / alerting**~~ **DONE 2026-05-29.** HA package
+  `/home/simon/homeassistant/packages/tv_monitoring.yaml` (packages enabled
+  via a `homeassistant: packages:` line in configuration.yaml). HA is
+  host-network so it hits the stack on localhost. 3 REST sensors +
+  3 automations → push to `notify.mobile_app_iphone_17_pro`:
+    - `sensor.tv_disk_free` ← gateway `/api/warm-status` `disk_free_gb`;
+      alert when `<50 GB` for 15 min.
+    - `sensor.tv_piped_backend` ← `:8881/healthcheck`; alert when
+      `unavailable` for 3 min (YouTube backend down).
+    - `sensor.tv_gateway_backend` ← gateway `/healthz`; alert when
+      `unavailable` for 5 min (503 = tv-receiver down).
+  Validated (`check_config` clean, HA restarted, sensors+automations
+  registered, no rest errors). Thresholds are tunable in the package. Could
+  extend later: recording-failure + detect-drain signals (see below).
 
-- **Extend YT-resolve isolation to ALL resolve routes** (idea 2026-05-29).
-  The `Semaphore` only guards `/streams` + `/synth-hls`. But `/channel`,
-  `/c`, `/user`, `/clips`, `/sponsors`, `/dearrow` also resolve YouTube and
-  can starve carriers under an IP-block if the app browses/searches during
-  one. Put them on a shared resolve semaphore — cheap, low-risk, closes the
-  gap left by the playback-only cap (commit 9e3b624).
+- ~~**Extend YT-resolve isolation to ALL resolve routes**~~ **DOWNGRADED
+  2026-05-29 — not worth doing.** On closer look the observed starvation was
+  the PLAYER-API path (`/streams`, `/synth-hls`), already capped (commit
+  9e3b624) — and with those carriers freed, the browse routes (`/channel`,
+  `/c`, `/user`, search) keep working *during* a player-block (they only hung
+  as collateral of full carrier-starvation). They'd only need a cap if
+  YouTube blocked the browse Innertube path *separately* (never observed),
+  and capping ~15 browse routes on a shared Semaphore(2) would cause frequent
+  503s during normal browsing (UX cost for speculative gain). `/sponsors` +
+  `/dearrow` are external APIs (not YouTube) — irrelevant. Only genuine
+  remnant: `/clips` (resolveClipId = a player-resolve, same risk) — fold into
+  the next piped-backend build rather than a dedicated rebuild for one rare
+  route.
 
 - **Investigate the yt-proxy throttle (root cause of the first-segment
   problem)** (idea 2026-05-29). The cached yt-proxy is bypassed because
@@ -198,16 +210,15 @@
   behaviour) wired into the build would catch regressions. Small; insurance
   now that the fork is complex enough that a silent break hurts.
 
-- **Back up tv-receiver state (DVR schedules / autorec / channel map)** (idea
-  2026-05-29; HIGH value, cheap). Confirmed gap: `tv-backup-labels.sh` backs
-  up the ML labels (ads_user.json + models) but NOT tv-receiver's state in
-  `~/bin/`: `dvr.json` (~480 schedules + the uuid→recording registry!),
-  `autorec.json` (19 rules), `channels.json` (95-channel slug→freq/pids map).
-  No script backs these up. If the NVMe dies (it has a history — APST hang,
-  memory `nvme_controller_hang_recovery`), all schedules + autorec rules + the
-  recording mapping are lost (cf. the migrator wipe that cost 485 dirs). Add
-  them to the existing daily backup (or a small rsync to the labels-backup
-  repo). `epg.json` (3.9 MB) is regenerable from the XMLTV feed → skip/optional.
+- ~~**Back up tv-receiver state (DVR schedules / autorec / channel map)**~~
+  **DONE 2026-05-29.** `tv-backup-labels.sh` now also rsyncs
+  `~/bin/{dvr,autorec,channels}.json` from the Pi into
+  `~/tv-labels-backup/tv-receiver-state/` (daily 04:30 launchd job →
+  GitHub). `epg.json` skipped (regenerable from the XMLTV feed). Verified:
+  the three files committed (snapshot 0e8870f). Restore is documented in the
+  script header (`rsync ~/tv-labels-backup/tv-receiver-state/ pi:/home/simon/bin/`
+  + `docker restart tv-receiver`). Closes the disaster-recovery gap (schedules
+  + autorec rules + the uuid→recording registry survive an SSD death now).
 
 - **Recording-failure detection + alert** (idea 2026-05-29). DVR recordings
   can come out as junk (~5 MB, stuck subs / mux re-tune mid-record — see
