@@ -21070,6 +21070,37 @@ def _satip_stream_health():
     return out
 
 
+@app.route("/healthz")
+def healthz():
+    """Lightweight liveness/readiness probe — mirrors tv-receiver's
+    `/healthz` shape (`{"ok": bool, ...}`, 200 or 503). Deliberately fast:
+    no SMB reads (unlike `/api/health`, which builds the dashboard). The
+    only IO is a 2 s probe of the tv-receiver backend so the result doubles
+    as a readiness signal. 200 + ok:true when this gateway serves AND the
+    backend is reachable; 503 + ok:false if the backend can't be reached."""
+    backend_ok = False
+    slots = active = None
+    try:
+        data = json.loads(urllib.request.urlopen(
+            f"{TV_RECEIVER_BASE}/healthz", timeout=2).read())
+        backend_ok = bool(data.get("ok", True))
+        s = data.get("slots", []) or []
+        slots = len(s)
+        active = sum(1 for x in s if x.get("consumers", 0) > 0)
+    except Exception:
+        backend_ok = False
+    resp = {
+        "ok": backend_ok,
+        "service": "hls-gateway",
+        "backend": "tv-receiver",
+        "backend_ok": backend_ok,
+        "tuner_slots": slots,
+        "active_slots": active,
+    }
+    return Response(json.dumps(resp), status=200 if backend_ok else 503,
+                    mimetype="application/json")
+
+
 @app.route("/api/health")
 def api_health():
     """Aggregate health snapshot for the dashboard. Reads heartbeats
