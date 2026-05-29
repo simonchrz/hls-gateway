@@ -303,7 +303,16 @@
   summaries or chapter markers from them — `video_analyzer_reference` memory
   noted this as a future template. Feature, not infra.
 
-- **Housekeeping: prune dead dirs/config** (idea 2026-05-29; low value).
-  Stale leftovers: `~/MPVKit-fork-stale`, `~/go2rtc` (container not running),
-  the disabled tvh-config-snapshot remnants, and the `~/caddy/Caddyfile` vs
-  git-copy drift (a deploy-from-git or drift-check would prevent recurrence).
+- ~~**Housekeeping: prune dead dirs/config**~~ **DONE 2026-05-29.**
+  - `~/go2rtc` (16 K leftover, no container, only referenced in stale
+    `Caddyfile.bak*`) — removed.
+  - `~/tvheadend` (9.8 M old tvh config + `docker-compose.yml.disabled`, no
+    container mounts it) — archived to `~/tvheadend-decommissioned-2026-05-27.tar.gz`
+    (4.9 M) then dir removed.
+  - `~/MPVKit-fork-stale` — didn't exist on Pi or Mac; stale backlog ref.
+  - Caddyfile drift: the authoritative pair (deployed `~/caddy/Caddyfile` +
+    the git copy) were already in sync; only the Pi's UNUSED
+    `~/hls-gateway/caddy/Caddyfile` checkout was ~31 lines stale — synced it
+    to deployed (drift=0 everywhere now). Caddy reads `~/caddy/Caddyfile`;
+    the git copy is the record. (A deploy-from-git / drift-check to *prevent*
+    recurrence wasn't built — low value; the copies match now.)
