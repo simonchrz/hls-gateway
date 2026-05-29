@@ -93,9 +93,14 @@
   piped-backend piped-bg-helper` (clears stuck threads; verified back to
   healthy + `/healthcheck` 200 in ms), but it re-hangs under load until
   the IP recovers (~1-12h). Two complementary robustness fixes:
-  1. **Thread-pool isolation** (the important one): run YT stream-resolves
-     on a dedicated, bounded executor separate from the request-serving
-     pool, so a YT stall can never starve `/healthcheck` + non-YT routes.
+  1. ~~**Thread-pool isolation**~~ **DONE 2026-05-29 (commit 9e3b624 in
+     simonchrz/Piped-Backend `ios-streaming-patches`):** `/streams` +
+     `/synth-hls` capped at `availableProcessors()/2` (=2 on Pi5) concurrent
+     resolves via a `Semaphore` in `ServerLauncher.java`; `tryAcquire(500ms)`
+     else fast-reject 503. Hung resolves now pin ≤2 carriers, so
+     `/healthcheck` + non-YT routes never starve. Validated without YouTube
+     (3rd concurrent resolve → 503 in 0.5s; `/healthcheck` 200 in 1.6ms in
+     parallel). A YT IP-block can no longer take the whole backend down.
   2. **Fail-fast resolve timeouts** on the still-unbounded throttle-facing
      calls: the WebEmbed fallback request `getWebEmbeddedPlayerResponseModern`
      in `YoutubeStreamExtractor.java`, and the HEAD throttle-checks
