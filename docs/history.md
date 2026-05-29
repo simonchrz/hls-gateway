@@ -275,8 +275,18 @@
   built):** rewrite `startDownloader` to fetch sequential BOUNDED range
   chunks (`Range: bytes=s-e`) instead of one no-Range pull → full speed →
   re-enable `rewriteToYtProxy` → segment caching returns → unlocks the
-  first-segment pre-fetch (846 ms) + cuts repeat-segment YT load. Extend
-  smoke-test with a yt-proxy segment 206 at full speed.
+  first-segment pre-fetch (846 ms) + cuts repeat-segment YT load.
+  **PROGRESS 2026-05-29:** chunked bounded-range downloader built + committed
+  (`ed64b1a`), verified in isolation (manual /yt-proxy fetch 206 @ 456 KB/s,
+  not 31 KB/s) — but kept **DORMANT** (`rewriteToYtProxy` still a no-op).
+  Re-enabling it surfaced googlevideo **403s on the cookie+Range fetch for
+  video itags**; couldn't disambiguate (YouTube-cookie+Range combo vs.
+  collateral IP-throttle from heavy same-day testing). Reverted to the
+  known-good piped-proxy path (playback restored). **Re-enable follow-up:**
+  on a FRESH IP (not after a test storm), retry the rewrite; if it still
+  403s, try the downloader WITHOUT the YouTube `Cookie` header (the working
+  direct-curl baseline sent no cookies). Then extend the smoke with a
+  full-speed yt-proxy segment check.
 
 - ~~**Smoke test for the Piped-Backend fork**~~ **DONE 2026-05-29 (commit
   `8c2729e` in simonchrz/Piped-Backend `ios-streaming-patches`).**
