@@ -120,3 +120,20 @@
   doubled it, since reverted). See project memory `piped_synth_hls_youtube`
   + `synth_hls_cache_ttl_cpn_throttle`. Don't test by hammering the same
   resolve — it re-triggers the block.
+
+- **tv-receiver EPG: extend horizon to 7+ days / cover the missing ~32
+  channels** (was a dangling `epg-horizon-ausweiten` "backlog memory"
+  reference in tv-receiver/CLAUDE.md that never existed — folded in here).
+  EPG currently covers ~7100 events across 63 of 95 slugs, ~3 days ahead
+  (epgshare01 DE1 XMLTV feed). The missing ~32 are mostly shopping/niche.
+  Follow-up: a longer-horizon / more-complete XMLTV source (or a second
+  feed merged in). Low priority.
+
+- **hls-gateway → Go rewrite** (roadmap, not started; full rationale in
+  project memory `hls_gateway_go_rewrite_roadmap`). `service.py` is
+  ~22.7k lines of Flask with the UI built as f-string HTML. Approach if
+  ever started: strangler-fig — stand up a Go gateway, proxy unmigrated
+  routes to Flask, migrate the data endpoints first (shared Go packages
+  with tv-receiver: fan-out, per-channel ffmpeg), HTML pages last. Big
+  lift, no concrete trigger yet. Near-term sub-item already noted in that
+  memory: add a `/healthz` route — DONE 2026-05-29 (it exists now).
