@@ -65,6 +65,25 @@
   warm prosieben tap trimmed 4780→382 chunks (-92% pre-keyframe replay).
   NOTE: only helps WARM muxes (ring must hold a keyframe); cold-tune
   first-frame is still bounded by the next live IDR — prewarm covers that.
+  Follow-ups same day: (a) packet-precise cut (commit in tv-receiver) so the
+  first replayed video bytes ARE the IDR packet — dropped the ≤7
+  pre-keyframe TS packets that shared the IDR's RTP payload (= the "mid-GOP
+  before keyframe" the app-dev saw causing brief h264 errors at join).
+  (b) Verified detection is correct, NOT too liberal: on prosieben
+  random_access_indicator marks IDRs exactly (ffprobe 14 keyframes = 14
+  PUSI+RAI hits over the same 14s capture; GOP ~1.1s, well inside the 3s
+  ring). The app-dev's "long GOP exceeds buffer" hypothesis was wrong.
+  The residual cold-start "~7s" is the iOS HLS segment floor (~6 segments),
+  a separate layer GOP-align doesn't touch — prewarm is the lever there.
+
+- **tv-receiver: autorec cross-UUID dedup** (shipped 2026-05-29). Recurring
+  shows double-recorded because the native autorec engine (UUID
+  dvr-<slug>-<evStart>) didn't dedup against tvh-migrated timers (UUID
+  dvr-<slug>-<paddedStart>) for the same airing. Added
+  ScheduleStore.CoveringSchedule (same slug+title, start within 300s) as a
+  pre-Add guard. Cleaned up 10 existing dupe clusters = 14.25 GB reclaimed
+  (all the redundant copies were migrated-from-tvh; native autorec copy
+  kept). Consecutive same-title episodes (≥~20 min apart) are NOT merged.
 
 ## Backlog (user mentioned, not built)
 
