@@ -19972,9 +19972,13 @@ def tuner_status():
         data = json.loads(urllib.request.urlopen(
             f"{TV_RECEIVER_BASE}/healthz", timeout=2).read())
         slots = data.get("slots", [])
-        if slots:
-            total = len(slots) or TUNER_TOTAL
-            used = sum(1 for s in slots if s.get("consumers", 0) > 0)
+        if slots is not None:
+            # tv-receiver dials slots LAZILY and keeps them warm-forever,
+            # each holding one FritzBox tuner allocation. So a dialed slot =
+            # a tuner in use; total capacity stays TUNER_TOTAL (the hw tuner
+            # count), NOT len(slots) — that's only the currently-dialed
+            # subset and would render "1/1" when a single mux is active.
+            used = len(slots)
     except Exception:
         pass
     try:
