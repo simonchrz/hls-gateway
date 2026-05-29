@@ -6,6 +6,29 @@ services:
     user: "1000:1000"
     restart: unless-stopped
     network_mode: host
+    healthcheck:
+      # Liveness, not readiness: any HTTP reply — incl. 503 when the
+      # tv-receiver backend is down — means THIS gateway is serving, so the
+      # check passes. Only a dead socket (connection refused / timeout)
+      # marks it unhealthy. That way a backend outage flags tv-receiver
+      # unhealthy without also flapping the gateway. python3 is used
+      # because the slim image ships no curl/wget.
+      test:
+        - CMD
+        - python3
+        - -c
+        - |
+          import urllib.request, urllib.error, sys
+          try:
+              urllib.request.urlopen("http://localhost:8080/healthz", timeout=3)
+          except urllib.error.HTTPError:
+              pass
+          except Exception:
+              sys.exit(1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     logging:
       driver: json-file
       options:
