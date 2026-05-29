@@ -138,12 +138,10 @@
   lift, no concrete trigger yet. Near-term sub-item already noted in that
   memory: add a `/healthz` route — DONE 2026-05-29 (it exists now).
 
-- **Channel-logo fallback still points at dead tvh imagecache** (found
-  2026-05-29). For channels without a `/static/ch-logos/<slug>` override,
-  the gateway emits an `imagecache/<id>` fallback URL — but tvh's
-  imagecache (`:9981`) is gone and tv-receiver has none, so those logos
-  are dead (the Caddy `/imagecache/*` route was removed; requests now 404
-  instead of 502). Fix is gateway-side: drop the imagecache fallback and
-  use a real source (tv-receiver channel icons, or a generated placeholder,
-  or just require a static logo). Cosmetic — only affects logo-less niche
-  channels. Low priority.
+- ~~**Channel-logo fallback still points at dead tvh imagecache**~~ **DONE
+  2026-05-29 (commit d07e1a5):** `_channel_logo_url` now returns `""` for any
+  `imagecache/<id>` fallback (tvh's :9981 is gone, tv-receiver has none), so
+  logo-less channels show the client placeholder instead of a dead 404/502
+  URL. Curated `/static/ch-logos/<slug>` overrides still win (all 24 favorite
+  channels have one). Optional future nicety (not done, marginal): a generated
+  initials-placeholder or a real icon source for niche channels.
