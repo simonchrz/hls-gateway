@@ -90,6 +90,12 @@ func main() {
 	// housekeeping — disk reclaim the Mac daemon triggers on its GC/prefetch loop
 	mux.Handle("/api/internal/drop-pi-source/", recProxy)
 	mux.Handle("/api/internal/cleanup-orphans", recProxy)
+	// recordings/detect leftovers (finish the Flask strangler). per-show-drift
+	// GET only — the /apply POST (tvh writes) stays on Flask for now.
+	mux.Handle("/api/internal/user-groups", recProxy)
+	mux.Handle("/api/internal/adaptive-padding", recProxy)
+	mux.Handle("GET /api/internal/per-show-drift", recProxy)
+	mux.Handle("/api/bumper/", recProxy)
 	// slice 6a — training orchestration (Mac trainer in/outputs)
 	mux.Handle("GET /api/internal/training-snapshot", recProxy)
 	mux.Handle("/api/internal/training-active", recProxy)
