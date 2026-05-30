@@ -37,11 +37,17 @@ func main() {
 		"Flask backend for unmigrated routes")
 	tvReceiver := flag.String("tv-receiver", "http://127.0.0.1:9983",
 		"tv-receiver base (live TV / EPG / DVR / channels)")
+	tvRecorder := flag.String("tv-recorder", "http://127.0.0.1:9984",
+		"tv-recorder base (recordings backend / detect orchestration)")
 	flag.Parse()
 
 	flask, err := url.Parse(*flaskURL)
 	if err != nil {
 		log.Fatalf("bad -flask url: %v", err)
+	}
+	recorder, err := url.Parse(*tvRecorder)
+	if err != nil {
+		log.Fatalf("bad -tv-recorder url: %v", err)
 	}
 
 	s := &server{
@@ -50,16 +56,27 @@ func main() {
 		proxy:      httputil.NewSingleHostReverseProxy(flask),
 		client:     &http.Client{Timeout: 5 * time.Second},
 	}
+	recProxy := httputil.NewSingleHostReverseProxy(recorder)
 
 	mux := http.NewServeMux()
 	// --- Routes migrated to Go (served natively) ---
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// --- Routes migrated to tv-recorder (slice 1: stateless detect-asset
+	//     file-serving + recording-uuids). Byte-faithful to Flask, verified
+	//     side-by-side. Rollback = delete these lines + redeploy. ---
+	mux.Handle("GET /api/internal/detect-models/", recProxy)
+	mux.Handle("GET /api/internal/detect-logo/", recProxy)
+	mux.Handle("GET /api/internal/detect-logo-cnn/", recProxy)
+	mux.Handle("GET /api/internal/detect-bumpers/", recProxy)
+	mux.Handle("GET /api/internal/detect-bumper/", recProxy)
+	mux.Handle("GET /api/internal/recording-uuids", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
 
 	log.Printf("hls-gateway-go: listening on %s", *addr)
 	log.Printf("  native: GET /healthz")
+	log.Printf("  tv-recorder: detect-models/logo(-cnn)/bumper(s) + recording-uuids → %s", recorder)
 	log.Printf("  proxy : everything else → %s", flask)
 	log.Printf("  tv-receiver: %s", *tvReceiver)
 
