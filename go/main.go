@@ -70,6 +70,8 @@ func main() {
 	mux.Handle("GET /api/internal/detect-bumpers/", recProxy)
 	mux.Handle("GET /api/internal/detect-bumper/", recProxy)
 	mux.Handle("GET /api/internal/recording-uuids", recProxy)
+	// detect-config — the Mac tv-detect daemon's per-job config fetch.
+	mux.Handle("GET /api/internal/detect-config/{uuid}", recProxy)
 	// slice 2 — HLS-remux job queue (Mac offload). hls-segment is PUT,
 	// hls-done is POST, so route the whole prefix (any method) to tv-recorder.
 	mux.Handle("GET /api/internal/hls-pending", recProxy)
