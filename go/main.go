@@ -1,0 +1,124 @@
+// hls-gateway-go — strangler-fig front for the ~22.7k-line Flask service.py.
+//
+// It listens where Flask used to (Caddy points here unchanged), serves the
+// routes that have been migrated to Go NATIVELY, and reverse-proxies every
+// other path straight to Flask. Migrating a route = add a native handler
+// here; until then nothing changes for that route. No big-bang: this stays
+// transparent for unmigrated paths.
+//
+//	Caddy(:8443) → hls-gateway-go(:8080) → Flask(:8081, unmigrated routes)
+//	                                     → tv-receiver(:9983) for live/EPG/DVR
+//
+// Run side-by-side first (e.g. -addr :8090 -flask :8080) to verify
+// transparency before the cutover (move Flask to :8081, take :8080).
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"log"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"time"
+)
+
+type server struct {
+	flask      *url.URL
+	tvReceiver string
+	proxy      *httputil.ReverseProxy
+	client     *http.Client
+}
+
+func main() {
+	addr := flag.String("addr", ":8080", "listen address (where Caddy points)")
+	flaskURL := flag.String("flask", "http://127.0.0.1:8081",
+		"Flask backend for unmigrated routes")
+	tvReceiver := flag.String("tv-receiver", "http://127.0.0.1:9983",
+		"tv-receiver base (live TV / EPG / DVR / channels)")
+	flag.Parse()
+
+	flask, err := url.Parse(*flaskURL)
+	if err != nil {
+		log.Fatalf("bad -flask url: %v", err)
+	}
+
+	s := &server{
+		flask:      flask,
+		tvReceiver: *tvReceiver,
+		proxy:      httputil.NewSingleHostReverseProxy(flask),
+		client:     &http.Client{Timeout: 5 * time.Second},
+	}
+
+	mux := http.NewServeMux()
+	// --- Routes migrated to Go (served natively) ---
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	// --- Everything else still belongs to Flask (incl. /api/channels,
+	//     which applies the favourites filter — a later slice) ---
+	mux.HandleFunc("/", s.proxy.ServeHTTP)
+
+	log.Printf("hls-gateway-go: listening on %s", *addr)
+	log.Printf("  native: GET /healthz")
+	log.Printf("  proxy : everything else → %s", flask)
+	log.Printf("  tv-receiver: %s", *tvReceiver)
+
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 15 * time.Second,
+	}
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("listen: %v", err)
+	}
+}
+
+// healthzResp is the exact shape Flask's /healthz returns (field order +
+// null on backend failure), so this is a byte-faithful drop-in. service stays
+// "hls-gateway" (not "-go") on purpose — clients shouldn't notice the swap.
+type healthzResp struct {
+	Ok          bool   `json:"ok"`
+	Service     string `json:"service"`
+	Backend     string `json:"backend"`
+	BackendOk   bool   `json:"backend_ok"`
+	TunerSlots  *int   `json:"tuner_slots"`
+	ActiveSlots *int   `json:"active_slots"`
+}
+
+// handleHealthz mirrors Flask's /healthz: a fast readiness probe gated on
+// tv-receiver. 2s probe of the backend's /healthz; reports slot counts.
+// 200 + ok:true when the backend answers, else 503 + ok:false + null counts.
+func (s *server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	out := healthzResp{Service: "hls-gateway", Backend: "tv-receiver"}
+	req, _ := http.NewRequestWithContext(ctx, "GET", s.tvReceiver+"/healthz", nil)
+	if resp, err := s.client.Do(req); err == nil {
+		var data struct {
+			Ok    *bool `json:"ok"`
+			Slots []struct {
+				Consumers int `json:"consumers"`
+			} `json:"slots"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&data) == nil {
+			out.BackendOk = data.Ok == nil || *data.Ok // default true if absent
+			n := len(data.Slots)
+			a := 0
+			for _, sl := range data.Slots {
+				if sl.Consumers > 0 {
+					a++
+				}
+			}
+			out.TunerSlots, out.ActiveSlots = &n, &a
+		}
+		resp.Body.Close()
+	}
+	out.Ok = out.BackendOk
+
+	w.Header().Set("Content-Type", "application/json")
+	if !out.BackendOk {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(out)
+}
