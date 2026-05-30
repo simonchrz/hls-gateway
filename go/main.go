@@ -85,6 +85,9 @@ func main() {
 	mux.Handle("/api/internal/detect-started/", recProxy)
 	mux.Handle("/api/internal/detect-give-up/", recProxy)
 	mux.Handle("/api/internal/cutlist-uploaded/", recProxy)
+	// slice 3a — VOD playlist (recording/<uuid>/index.m3u8). Segments are
+	// Caddy-static (@rec_ts); /recording/<uuid>/{ads,source,...} stay Flask.
+	mux.Handle("GET /recording/{uuid}/index.m3u8", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
