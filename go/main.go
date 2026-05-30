@@ -128,6 +128,10 @@ func main() {
 	// recommendations engine) via the catch-all below.
 	mux.Handle("GET /api/learning/auto-schedule-log", recProxy)
 	mux.Handle("POST /api/learning/auto-schedule-pause", recProxy)
+	// slice 6f — external-app recordings library (list + single). Playability
+	// filter + flat app schema. /api/recording/<uuid>/* (singular) stays Flask.
+	mux.Handle("GET /api/recordings", recProxy)
+	mux.Handle("GET /api/recordings/{uuid}", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
