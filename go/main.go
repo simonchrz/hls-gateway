@@ -85,6 +85,11 @@ func main() {
 	mux.Handle("/api/internal/detect-started/", recProxy)
 	mux.Handle("/api/internal/detect-give-up/", recProxy)
 	mux.Handle("/api/internal/cutlist-uploaded/", recProxy)
+	// slice 6a — training orchestration (Mac trainer in/outputs)
+	mux.Handle("GET /api/internal/training-snapshot", recProxy)
+	mux.Handle("/api/internal/training-active", recProxy)
+	mux.Handle("POST /api/internal/training-duration", recProxy)
+	mux.Handle("POST /api/internal/head-bundle", recProxy)
 	// slice 3a — VOD playlist (recording/<uuid>/index.m3u8). Segments are
 	// Caddy-static (@rec_ts); /recording/<uuid>/{ads,source,...} stay Flask.
 	mux.Handle("GET /recording/{uuid}/index.m3u8", recProxy)
