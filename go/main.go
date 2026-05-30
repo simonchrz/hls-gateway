@@ -93,6 +93,9 @@ func main() {
 	// slice 4 — ad-block markers (GET; /api/recording/<uuid>/ads/edit POST
 	// stays Flask — it writes training data, a later slice)
 	mux.Handle("GET /recording/{uuid}/ads", recProxy)
+	// slice 5 — whisper full-text search (FTS5, pure-Go sqlite in tv-recorder)
+	mux.Handle("GET /api/search", recProxy)
+	mux.Handle("POST /api/internal/whisper-reindex", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
