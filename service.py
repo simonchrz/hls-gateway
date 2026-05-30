@@ -119,14 +119,9 @@ HOST_URL       = os.environ.get("HOST_URL", "http://raspberrypi5lan:8080")
 IDLE_TIMEOUT   = int(os.environ.get("IDLE_TIMEOUT", "120"))
 MAX_WARM_STREAMS = int(os.environ.get("MAX_WARM_STREAMS", "3"))
 WARM_TTL_SECONDS = int(os.environ.get("WARM_TTL_SECONDS", "180"))
-# Idle-timeout for external-app live sessions (/api/app/live/<slug>/*).
-# Tighter than WARM_TTL because apps are user-attended single-stream
-# consumers — when AVPlayer stops polling for >APP_IDLE_TIMEOUT, free
-# the tuner immediately so DVR can claim it. The app naturally caps
-# itself to ONE concurrent channel because AVPlayer plays one stream.
-APP_IDLE_TIMEOUT = int(os.environ.get("APP_IDLE_TIMEOUT", "60"))
-_app_session = {"slug": None, "last_seen": 0.0}
-_app_lock = threading.Lock()
+# APP_IDLE_TIMEOUT / _app_session / _app_lock removed 2026-05-30 (slice 5):
+# external-app live sessions are tracked by tv-receiver now (it serves
+# /api/app/live directly).
 # Watched recordings older than this get auto-deleted by the cleanup
 # loop. tvheadend's `watched` field is read-only/computed; the user-
 # settable proxy is `playcount` (>0 means watched). Player auto-marks
@@ -1258,139 +1253,12 @@ def ensure_running(slug):
         stop_channel(v)
 
 
-def _compute_prewarm_neighbors(slug):
-    """Adjacency-aware prewarm targets for the channel `slug`.
-
-    The favourite channels are surfed in channel_map order (= tv-receiver
-    channels.json order, grouped by mux). Channels sharing the current
-    channel's mux are already warm (PID-union) — switching to them is
-    instant. The cold points are the mux *boundaries*. So we return the
-    first channel in EACH direction that sits on a different mux: those are
-    the muxes the viewer hits if they keep surfing up/down. Pre-warming one
-    representative per neighbouring mux holds that mux tuned + fills its
-    replay ring with keyframes → the next switch GOP-aligns instantly.
-
-    Mid-block both neighbours are same-mux → we look past them to the block
-    edge, so we still warm the *next* mux without spending a tuner on the
-    already-warm current one. Returns 0-2 slugs."""
-    order = list(channel_map.keys())
-    if slug not in order:
-        return []
-    i = order.index(slug)
-    cur_mux = channel_map[slug].get("mux_uuid")
-    picks = []
-    # First different-mux channel walking toward the end of the list.
-    for j in range(i + 1, len(order)):
-        if channel_map[order[j]].get("mux_uuid") != cur_mux:
-            picks.append(order[j])
-            break
-    # First different-mux channel walking toward the start.
-    for j in range(i - 1, -1, -1):
-        if channel_map[order[j]].get("mux_uuid") != cur_mux:
-            picks.append(order[j])
-            break
-    return picks
-
-
-def _post_prewarm(slugs):
-    """Push the desired prewarm set to tv-receiver (replace semantics).
-    Best-effort: prewarm is a latency optimisation, never block a switch on
-    it."""
-    try:
-        req = urllib.request.Request(
-            f"{TV_RECEIVER_BASE}/api/prewarm",
-            data=json.dumps({"slugs": slugs}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST")
-        urllib.request.urlopen(req, timeout=3).read()
-    except Exception as e:
-        print(f"[prewarm] post {slugs} failed: {e}", flush=True)
-
-
-# Baseline mux kept warm even when the app is idle (= the busiest favourite
-# mux, 546). Preserves the old `-prewarm vox` always-warm behaviour so the
-# first app-open after idle isn't a cold tune; dynamic neighbours stack on
-# top. Env-overridable (comma list); empty string = no baseline.
-PREWARM_BASE = [s for s in os.environ.get("PREWARM_BASE", "vox").split(",") if s.strip()]
-
-
-def _spawn_prewarm_update(slug):
-    """Recompute + push baseline + neighbour prewarm targets off the switch
-    hot-path. Idle (slug=None) still posts the baseline."""
-    targets = list(PREWARM_BASE)
-    if slug:
-        for n in _compute_prewarm_neighbors(slug):
-            if n not in targets:
-                targets.append(n)
-    threading.Thread(target=_post_prewarm, args=(targets,), daemon=True).start()
-
-
-def _app_track(slug):
-    """Mark `slug` as the active external-app session. Switching from
-    one slug to another immediately stops the previous one (unless it
-    has other consumers indicated by recent non-app activity, or is
-    pinned ALWAYS_WARM). Tighter eviction than the shared warm pool
-    so the app never holds more than one tuner.
-
-    Pass `slug=None` to release the current session without acquiring
-    a new one — used when the app switches to a tuner-free source
-    (mediathek-passthru for ARD/ZDF/etc)."""
-    now = time.time()
-    prev = None
-    changed = False
-    with _app_lock:
-        old = _app_session["slug"]
-        if old != slug:
-            changed = True
-        if old and old != slug:
-            prev = old
-        _app_session["slug"] = slug
-        _app_session["last_seen"] = now if slug else 0.0
-    # On an actual switch, update the adjacency-aware prewarm set so the
-    # muxes the viewer is most likely to surf into next are kept warm
-    # (= GOP-aligned instant channel-change). slug=None clears it.
-    if changed:
-        _spawn_prewarm_update(slug)
-    if prev and prev not in ALWAYS_WARM:
-        # Only stop if no fresh non-app activity in last 10s — covers
-        # the case where the web UI is also watching the prev channel.
-        with active_lock:
-            info = channels.get(prev)
-            recent = (info and now - info.get("last_seen", 0) < 10)
-        if not recent:
-            print(f"[app] switched {prev} → {slug}, stopping prev",
-                  flush=True)
-            stop_channel(prev)
-
-
-def _app_idle_loop():
-    """Stop the active app channel after APP_IDLE_TIMEOUT seconds of
-    no segment activity. Frees the tuner aggressively (60s default vs
-    the 180s general WARM_TTL) so DVR can claim it as soon as the app
-    user walks away."""
-    while True:
-        time.sleep(15)
-        try:
-            with _app_lock:
-                slug = _app_session["slug"]
-            if not slug:
-                continue
-            with active_lock:
-                info = channels.get(slug)
-            last_seen = info["last_seen"] if info else 0
-            if not last_seen:
-                with _app_lock:
-                    _app_session["slug"] = None
-                continue
-            if time.time() - last_seen > APP_IDLE_TIMEOUT:
-                if slug not in ALWAYS_WARM:
-                    print(f"[app] idle TTL {APP_IDLE_TIMEOUT}s expired "
-                          f"for {slug}", flush=True)
-                    stop_channel(slug)
-                with _app_lock:
-                    _app_session["slug"] = None
-        except Exception as e:
-            print(f"[app] idle-loop error: {e}", flush=True)
+# _compute_prewarm_neighbors / _post_prewarm / PREWARM_BASE / _spawn_prewarm_update
+# / _app_track / _app_idle_loop removed 2026-05-30 (slice 5). The external app's
+# live-TV now goes straight to tv-receiver (/api/app/live → Caddy → :9983), which
+# owns app-session tracking, adjacency-prewarm and tight per-app eviction. The
+# gateway no longer drives tv-receiver's prewarm — the dual-writer is gone.
+# (Warm-pool ensure_running/start_ffmpeg/hls_playlist stay: the web UI uses them.)
 
 
 def idle_killer_loop():
@@ -2192,76 +2060,11 @@ def hls_playlist_dvr(slug):
     return _cors(resp)
 
 
-@app.route("/api/app/live/<slug>/index.m3u8")
-def app_live_playlist(slug):
-    """Live HLS playlist for external app clients. Two routing modes:
-
-    1) Channel has a mediathek-passthru upstream (ARD, ZDF, 3sat,
-       Arte, KiKA, Tagesschau24): delegate to /mediathek-passthru/
-       so no tuner is held. The 6 public-broadcaster channels stream
-       directly from the broadcaster CDN — DVR keeps full tuner
-       capacity even while the app watches these.
-    2) Tuner-based channel: standard single-tuner-per-app behavior.
-       Switching channels stops the previous app channel (unless
-       ALWAYS_WARM-pinned or web UI is also actively watching it).
-       Idle eviction APP_IDLE_TIMEOUT (60s default).
-
-    Web UI continues to use /hls/<slug>/index.m3u8 with shared warm-
-    pool semantics. App should poll segments from the same URL prefix
-    the playlist references — bare filenames resolve relative to the
-    manifest URL."""
-    with cmap_lock:
-        if slug not in channel_map:
-            abort(404, "unknown channel")
-    if slug in MEDIATHEK_LIVE:
-        _app_track(None)
-        return mediathek_passthru_master(slug)
-    _app_track(slug)
-    return hls_playlist(slug)
-
-
-@app.route("/api/app/live/<slug>/dvr.m3u8")
-def app_live_dvr(slug):
-    """DVR variant of /api/app/live/<slug>/index.m3u8. For mediathek-
-    backed channels the upstream restart window (2-3 h depending on
-    broadcaster) is used; for tuner-based channels the local 2 h
-    HLS-DVR buffer applies."""
-    with cmap_lock:
-        if slug not in channel_map:
-            abort(404, "unknown channel")
-    if slug in MEDIATHEK_LIVE:
-        _app_track(None)
-        return mediathek_passthru_master(slug)
-    _app_track(slug)
-    return hls_playlist_dvr(slug)
-
-
-@app.route("/api/app/live/<slug>/<filename>")
-def app_live_segment(slug, filename):
-    """Segment + nested-playlist passthrough for the app-scoped live
-    endpoint. AVPlayer/mpv resolve `seg_NNNNNN.ts` from the manifest
-    relative to the manifest's URL — they land here instead of under
-    /hls/<slug>/. We serve the same bytes from the shared HLS_DIR/<slug>
-    directory and update the warm-pool last_seen so the channel stays
-    alive while the app polls."""
-    with cmap_lock:
-        if slug not in channel_map:
-            abort(404)
-    if not (filename.endswith(".ts") or filename.endswith(".m3u8")):
-        abort(404)
-    fp = HLS_DIR / slug / filename
-    if not fp.is_file():
-        abort(404)
-    with active_lock:
-        if slug in channels:
-            channels[slug]["last_seen"] = time.time()
-    with _app_lock:
-        if _app_session.get("slug") == slug:
-            _app_session["last_seen"] = time.time()
-    mime = "video/mp2t" if filename.endswith(".ts") \
-           else "application/vnd.apple.mpegurl"
-    return _cors(send_from_directory(HLS_DIR / slug, filename,
-                                      mimetype=mime))
+# app_live_playlist / app_live_dvr / app_live_segment (/api/app/live/<slug>/*)
+# removed 2026-05-30 (slice 5). tv-receiver serves these directly now (Caddy
+# routes /api/app/live/* + /mediathek-passthru/* → :9983). The app-URL strings
+# the gateway still emits (api_app_endpoints) keep pointing at /api/app/live/...,
+# which Caddy resolves to tv-receiver. Web UI keeps /hls/<slug>/* below.
 
 
 @app.route("/hls/<slug>/<filename>")
@@ -12788,12 +12591,10 @@ def api_live_ads_stream(slug):
     Each connection holds a waitress worker thread for its lifetime;
     with the default pool of 4 we can hold 4 concurrent player tabs
     before /api/* requests start queuing. Plenty for home use."""
-    # The app re-subscribes to this SSE on every channel switch, so it is
-    # our reliable per-switch hook — the raw-TS player path does not hit the
-    # m3u8 handler that calls _app_track. Refresh the adjacency-aware
-    # prewarm set for the now-current channel (fire-and-forget, idempotent
-    # so SSE reconnects on the same slug are harmless).
-    _spawn_prewarm_update(slug)
+    # Prewarm refresh removed 2026-05-30 (slice 5): tv-receiver now owns
+    # adjacency-prewarm, driven by its own /api/app/live switch hook. The
+    # gateway no longer posts to /api/prewarm (dual-writer gone). This SSE
+    # still streams the live-ads payload, unchanged.
     def gen():
         last_mtime = -1
         last_payload = None
@@ -22745,7 +22546,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGHUP, _sighup_reload)
     threading.Thread(target=_file_watcher_loop, daemon=True).start()
     threading.Thread(target=idle_killer_loop, daemon=True).start()
-    threading.Thread(target=_app_idle_loop, daemon=True).start()
+    # _app_idle_loop removed 2026-05-30 (slice 5): tv-receiver evicts app sessions.
     threading.Thread(target=prewarm_codecs, daemon=True).start()
     threading.Thread(target=epg_snapshot_loop, daemon=True).start()
     threading.Thread(target=_rec_prewarm_loop, daemon=True).start()
