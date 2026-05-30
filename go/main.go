@@ -132,6 +132,9 @@ func main() {
 	// filter + flat app schema. /api/recording/<uuid>/* (singular) stays Flask.
 	mux.Handle("GET /api/recordings", recProxy)
 	mux.Handle("GET /api/recordings/{uuid}", recProxy)
+	// slice 6g — playback-state writers (resume position + watched flag).
+	mux.Handle("POST /api/recording/{uuid}/playposition", recProxy)
+	mux.Handle("POST /api/recording/{uuid}/watched", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
