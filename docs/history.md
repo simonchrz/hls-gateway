@@ -211,7 +211,7 @@
   channels have one). Optional future nicety (not done, marginal): a generated
   initials-placeholder or a real icon source for niche channels.
 
-- **synth-hls: first-segment warmup (cold-tap latency)** (app-dev finding
+- ~~**synth-hls: first-segment warmup (cold-tap latency)**~~ **DONE 2026-05-30 (fork 60d1b32):** now that the yt-proxy caches (de8ff1d), YtProxyHandlers.prewarm() starts the first-chunk download at synth-hls variant build (~200ms before mpv asks) -> first segment is a cache HIT (~250ms vs ~850ms cold). Fixes the ~50% hit-rate the app-dev measured (was a populate-timing race). No double-fetch (the yt-proxy caches; download happens anyway, just earlier). Verified: first 256KB segment 0.004s @ 67MB/s after a 300ms gap. ORIGINAL NOTE: (app-dev finding
   2026-05-29, after the resolve-reuse win brought cold-tap to ~1.7s). The
   biggest remaining server-side chunk is the **first segment fetch ~846ms**:
   piped-proxy (:8882) synchronously pulls the first googlevideo chunk when
