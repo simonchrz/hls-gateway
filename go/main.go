@@ -119,6 +119,10 @@ func main() {
 	// stay on Flask via the catch-all below — a later (6d) slice.
 	mux.Handle("GET /api/learning/summary", recProxy)
 	mux.Handle("GET /api/learning/deletion-candidates", recProxy)
+	// slice 6d — show-fingerprint auto-confirm (scan + leave-one-out validate).
+	// EPG/DVR-mutating learning routes (plan, auto-schedule-*) stay on Flask.
+	mux.Handle("POST /api/learning/fingerprint-scan", recProxy)
+	mux.Handle("POST /api/learning/fingerprint-validate", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
