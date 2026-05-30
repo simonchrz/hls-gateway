@@ -140,6 +140,14 @@ func main() {
 	// AUTO_SCHED_LOOP_OWNER=recorder disables Flask's loop).
 	mux.Handle("POST /api/learning/plan", recProxy)
 	mux.Handle("POST /api/learning/auto-schedule-trigger", recProxy)
+	// slice 3a/3b — recording-management: thumb/poster serves + ads_user.json
+	// review writers (mark-reviewed/skip-event/auto-confirm-undo).
+	mux.Handle("GET /recording/{uuid}/thumbs.json", recProxy)
+	mux.Handle("GET /recording/{uuid}/thumbs/{fname}", recProxy)
+	mux.Handle("GET /recording/{uuid}/poster.jpg", recProxy)
+	mux.Handle("POST /api/recording/{uuid}/mark-reviewed", recProxy)
+	mux.Handle("POST /api/recording/{uuid}/skip-event", recProxy)
+	mux.Handle("POST /api/recording/{uuid}/auto-confirm-undo", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
