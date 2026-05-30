@@ -123,6 +123,11 @@ func main() {
 	// EPG/DVR-mutating learning routes (plan, auto-schedule-*) stay on Flask.
 	mux.Handle("POST /api/learning/fingerprint-scan", recProxy)
 	mux.Handle("POST /api/learning/fingerprint-validate", recProxy)
+	// slice 6e — file-based auto-scheduler state (log read + pause toggle).
+	// auto-schedule-trigger + plan stay on Flask (EPG/DVR-mutating + the
+	// recommendations engine) via the catch-all below.
+	mux.Handle("GET /api/learning/auto-schedule-log", recProxy)
+	mux.Handle("POST /api/learning/auto-schedule-pause", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
