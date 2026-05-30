@@ -96,6 +96,16 @@ func main() {
 	// slice 5 — whisper full-text search (FTS5, pure-Go sqlite in tv-recorder)
 	mux.Handle("GET /api/search", recProxy)
 	mux.Handle("POST /api/internal/whisper-reindex", recProxy)
+	// slice 5b — spot-fingerprint endpoints (clustering + extraction). The
+	// extraction worker is NOT enabled (matches Flask, whose worker is dead
+	// code); these serve/cluster the shared .spot-fingerprints.sqlite. Proven
+	// byte-identical extraction + identical clustering partition.
+	mux.Handle("GET /api/internal/spot-fp/cluster-anchored/", recProxy)
+	mux.Handle("GET /api/internal/spot-fp/queue", recProxy)
+	mux.Handle("GET /api/internal/spot-fingerprints/families", recProxy)
+	mux.Handle("POST /api/internal/spot-fp/upload", recProxy)
+	mux.Handle("POST /api/internal/spot-fingerprints/rebuild", recProxy)
+	mux.Handle("POST /api/internal/spot-fingerprints/backfill-dhashes", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
