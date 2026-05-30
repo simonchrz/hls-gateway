@@ -95,6 +95,7 @@ func main() {
 	mux.Handle("/api/internal/user-groups", recProxy)
 	mux.Handle("/api/internal/adaptive-padding", recProxy)
 	mux.Handle("GET /api/internal/per-show-drift", recProxy)
+	mux.Handle("POST /api/internal/per-show-drift/apply", recProxy)
 	mux.Handle("/api/bumper/", recProxy)
 	// slice 6a — training orchestration (Mac trainer in/outputs)
 	mux.Handle("GET /api/internal/training-snapshot", recProxy)
