@@ -148,6 +148,9 @@ func main() {
 	mux.Handle("POST /api/recording/{uuid}/mark-reviewed", recProxy)
 	mux.Handle("POST /api/recording/{uuid}/skip-event", recProxy)
 	mux.Handle("POST /api/recording/{uuid}/auto-confirm-undo", recProxy)
+	// slice 3c — redetect (re-queue detect) + show-start (drift marker).
+	mux.Handle("POST /api/recording/{uuid}/redetect", recProxy)
+	mux.Handle("POST /api/recording/{uuid}/show-start", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
