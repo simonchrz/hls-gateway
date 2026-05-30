@@ -96,9 +96,11 @@ func main() {
 	mux.Handle("GET /recording/{uuid}/index.m3u8", recProxy)
 	// slice 3b — original .ts source (Mac fetch for remux/detect/thumbs)
 	mux.Handle("GET /recording/{uuid}/source", recProxy)
-	// slice 4 — ad-block markers (GET; /api/recording/<uuid>/ads/edit POST
-	// stays Flask — it writes training data, a later slice)
+	// slice 4 — ad-block markers (GET)
 	mux.Handle("GET /recording/{uuid}/ads", recProxy)
+	// slice 4b — ads edit (writes ads_user.json + drops spot fingerprints,
+	// both now owned by tv-recorder)
+	mux.Handle("POST /api/recording/{uuid}/ads/edit", recProxy)
 	// slice 5 — whisper full-text search (FTS5, pure-Go sqlite in tv-recorder)
 	mux.Handle("GET /api/search", recProxy)
 	mux.Handle("POST /api/internal/whisper-reindex", recProxy)
