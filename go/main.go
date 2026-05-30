@@ -90,6 +90,7 @@ func main() {
 	mux.Handle("/api/internal/training-active", recProxy)
 	mux.Handle("POST /api/internal/training-duration", recProxy)
 	mux.Handle("POST /api/internal/head-bundle", recProxy)
+	mux.Handle("POST /api/internal/snapshot-per-show-iou", recProxy)
 	// slice 3a — VOD playlist (recording/<uuid>/index.m3u8). Segments are
 	// Caddy-static (@rec_ts); /recording/<uuid>/{ads,source,...} stay Flask.
 	mux.Handle("GET /recording/{uuid}/index.m3u8", recProxy)
