@@ -11220,16 +11220,21 @@ DETECT_RUNNING_STALE_S = 600  # daemon crash → entry expires after 10 min
 
 def _detect_is_running(uuid):
     """True if the Mac daemon has signalled it picked up this detect job
-    and hasn't reported completion yet. Stale entries (>10 min) are
-    pruned in-place so a crashed daemon doesn't leave permanent badges."""
+    and hasn't reported completion yet. Stale entries (>10 min) don't count.
+    The detect queue now lives in tv-recorder, which persists the running
+    set to .detect-running.json; we read that (falling back to the legacy
+    in-memory dict for any still-Flask writer)."""
     with _detect_running_lock:
         ts = _detect_running.get(uuid)
-        if ts is None:
-            return False
-        if time.time() - ts > DETECT_RUNNING_STALE_S:
-            _detect_running.pop(uuid, None)
-            return False
-        return True
+    if ts is None:
+        try:
+            ts = json.loads(
+                (HLS_DIR / ".detect-running.json").read_text()).get(uuid)
+        except Exception:
+            ts = None
+    if ts is None:
+        return False
+    return time.time() - ts <= DETECT_RUNNING_STALE_S
 
 
 def _rec_source_or_recover(uuid):
@@ -20207,9 +20212,17 @@ def _hb_age(filename):
     the in-memory daemon-poll timestamps instead of reading a file —
     daemons pull jobs over HTTP, don't write to the SMB share."""
     if filename == ".mac-comskip-alive":
-        if _daemon_last_poll == 0:
+        # tv-recorder owns the detect/hls/thumbs pollers now and bumps
+        # .daemon-last-poll's mtime; fall back to the in-memory global for
+        # any still-Flask poller. Whichever is fresher wins.
+        ts = _daemon_last_poll
+        try:
+            ts = max(ts, (HLS_DIR / ".daemon-last-poll").stat().st_mtime)
+        except Exception:
+            pass
+        if ts == 0:
             return None
-        return int(time.time() - _daemon_last_poll)
+        return int(time.time() - ts)
     if filename == ".mac-live-comskip-alive":
         if _live_scanner_last_poll == 0:
             return None

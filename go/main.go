@@ -78,6 +78,13 @@ func main() {
 	// slice 2b — thumbnail extraction offload (thumbs-uploaded is POST)
 	mux.Handle("GET /api/internal/thumbs-pending", recProxy)
 	mux.Handle("/api/internal/thumbs-uploaded/", recProxy)
+	// slice 2c — detect job queue (the last poller; tv-recorder now owns the
+	// _daemon_last_poll + _detect_running badge state via files Flask reads)
+	mux.Handle("GET /api/internal/detect-pending", recProxy)
+	mux.Handle("GET /api/internal/detect-pending-low", recProxy)
+	mux.Handle("/api/internal/detect-started/", recProxy)
+	mux.Handle("/api/internal/detect-give-up/", recProxy)
+	mux.Handle("/api/internal/cutlist-uploaded/", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
