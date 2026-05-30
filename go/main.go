@@ -155,6 +155,8 @@ func main() {
 	mux.Handle("POST /api/recording/{uuid}/show-start", recProxy)
 	// slice 3e — bumper-capture (ffmpeg frame extract + channel re-detect)
 	mux.Handle("POST /api/recording/{uuid}/bumper-capture", recProxy)
+	// slice 3f — trim (lossless ffmpeg cut, replaces source) — DESTRUCTIVE
+	mux.Handle("POST /api/recording/{uuid}/trim", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
