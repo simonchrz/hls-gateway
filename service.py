@@ -22634,7 +22634,11 @@ if __name__ == "__main__":
         init_done_marker.touch()
     except Exception:
         pass
-    threading.Thread(target=_auto_confirm_loop, daemon=True).start()
+    # Auto-confirm apply-loop migrated to tv-recorder (slice 4b). Set
+    # AUTO_CONFIRM_LOOP_OWNER=recorder to disable Flask's loop; both running
+    # would double-apply auto-confirmations.
+    if os.environ.get("AUTO_CONFIRM_LOOP_OWNER", "flask") == "flask":
+        threading.Thread(target=_auto_confirm_loop, daemon=True).start()
     # spot-fp extraction moved to Mac (tv-spot-extract.py) — Pi only
     # stores + indexes via /api/internal/spot-fp/upload. Worker thread
     # + resume-at-boot are no-ops now (kept callable for one-off
