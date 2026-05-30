@@ -22597,7 +22597,11 @@ if __name__ == "__main__":
         sched_init_marker.touch()
     except Exception:
         pass
-    threading.Thread(target=_auto_schedule_loop, daemon=True).start()
+    # Auto-scheduler daily loop migrated to tv-recorder (slice 6h). Set
+    # AUTO_SCHED_LOOP_OWNER=recorder to disable Flask's loop and avoid both
+    # services double-scheduling. Default "flask" keeps legacy behaviour.
+    if os.environ.get("AUTO_SCHED_LOOP_OWNER", "flask") == "flask":
+        threading.Thread(target=_auto_schedule_loop, daemon=True).start()
     threading.Thread(target=_adaptive_padding_loop, daemon=True).start()
     # Default-pause auto-confirm on first install — user opts-in
     # explicitly via /learning toggle once they've seen a few sample

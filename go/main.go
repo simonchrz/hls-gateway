@@ -135,6 +135,11 @@ func main() {
 	// slice 6g — playback-state writers (resume position + watched flag).
 	mux.Handle("POST /api/recording/{uuid}/playposition", recProxy)
 	mux.Handle("POST /api/recording/{uuid}/watched", recProxy)
+	// slice 6h — recommendation scheduler (plan) + auto-scheduler trigger.
+	// The daily auto-schedule loop also moved to tv-recorder (gateway env
+	// AUTO_SCHED_LOOP_OWNER=recorder disables Flask's loop).
+	mux.Handle("POST /api/learning/plan", recProxy)
+	mux.Handle("POST /api/learning/auto-schedule-trigger", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
