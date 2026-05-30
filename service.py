@@ -13987,6 +13987,17 @@ def api_internal_active_channels():
                 active.append(d.name)
         except Exception:
             continue
+    # Union tv-receiver's active channels: live-TV (web + app) is served
+    # there now, so its warm transcodes are the real "being watched" signal.
+    # HLS_DIR above only still moves for legacy gateway-served channels.
+    # Without this union the Mac live-ad scanner misses every tv-receiver
+    # channel — i.e. live ad-skip would silently stop working.
+    try:
+        with urllib.request.urlopen(
+                f"{TV_RECEIVER_BASE}/api/internal/active-channels", timeout=3) as r:
+            active = list(set(active) | set(json.load(r).get("active", [])))
+    except Exception as e:
+        print(f"active-channels: tv-receiver fetch failed ({e})", flush=True)
     return _cors(Response(json.dumps({"active": sorted(active)}),
                             mimetype="application/json"))
 
