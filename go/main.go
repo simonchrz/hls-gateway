@@ -75,6 +75,9 @@ func main() {
 	mux.Handle("GET /api/internal/hls-pending", recProxy)
 	mux.Handle("/api/internal/hls-segment/", recProxy)
 	mux.Handle("/api/internal/hls-done/", recProxy)
+	// slice 2b — thumbnail extraction offload (thumbs-uploaded is POST)
+	mux.Handle("GET /api/internal/thumbs-pending", recProxy)
+	mux.Handle("/api/internal/thumbs-uploaded/", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
