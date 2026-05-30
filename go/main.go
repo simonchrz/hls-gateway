@@ -96,6 +96,8 @@ func main() {
 	mux.Handle("GET /recording/{uuid}/index.m3u8", recProxy)
 	// slice 3b — original .ts source (Mac fetch for remux/detect/thumbs)
 	mux.Handle("GET /recording/{uuid}/source", recProxy)
+	// slice 3d — player-loader progress poll (kicks off remux/detect/thumbs)
+	mux.Handle("GET /recording/{uuid}/progress", recProxy)
 	// slice 4 — ad-block markers (GET)
 	mux.Handle("GET /recording/{uuid}/ads", recProxy)
 	// slice 4b — ads edit (writes ads_user.json + drops spot fingerprints,
