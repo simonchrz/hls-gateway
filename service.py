@@ -22814,9 +22814,13 @@ if __name__ == "__main__":
         # always have a free slot even when several daemon transfers
         # are in flight.
         # removed so server banner doesn't leak the version.
-        print("serving via waitress on 0.0.0.0:8080", flush=True)
-        serve(app, host="0.0.0.0", port=8080, threads=64, ident=None)
+        # Port is env-driven for the Go strangler-fig cutover: the Go gateway
+        # takes :8080 (Caddy unchanged) and proxies unmigrated routes here on
+        # GATEWAY_PORT=8081. Default 8080 = pre-cutover behaviour (no change).
+        gw_port = int(os.environ.get("GATEWAY_PORT", "8080"))
+        print(f"serving via waitress on 0.0.0.0:{gw_port}", flush=True)
+        serve(app, host="0.0.0.0", port=gw_port, threads=64, ident=None)
     except ImportError:
         print("waitress not installed, falling back to flask dev server",
               flush=True)
-        app.run(host="0.0.0.0", port=8080, threaded=True)
+        app.run(host="0.0.0.0", port=int(os.environ.get("GATEWAY_PORT", "8080")), threaded=True)

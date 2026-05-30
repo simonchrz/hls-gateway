@@ -6,6 +6,10 @@ services:
     user: "1000:1000"
     restart: unless-stopped
     network_mode: host
+    # Strangler-fig: the Go gateway takes :8080 (Caddy unchanged) and proxies
+    # unmigrated routes to Flask on :8081. The wrapper supervises both. Revert
+    # to pure Flask by removing this command line (Dockerfile CMD = service.py).
+    command: ["/usr/bin/bash", "/app/gateway-entrypoint.sh"]
     healthcheck:
       # Liveness, not readiness: any HTTP reply — incl. 503 when the
       # tv-receiver backend is down — means THIS gateway is serving, so the
@@ -42,6 +46,10 @@ services:
       - /mnt/tv:/recordings
       - ./tv-detect:/usr/local/bin/tv-detect:ro
       - ./libonnxruntime.so.1.25.0:/usr/lib/aarch64-linux-gnu/libonnxruntime.so:ro
+      # Go strangler-fig front + its supervisor entrypoint (built artifact +
+      # script; the Go SOURCE is in go/, the binary is deployed like tv-detect).
+      - ./hls-gateway-go:/app/hls-gateway-go:ro
+      - ./gateway-entrypoint.sh:/app/gateway-entrypoint.sh:ro
     environment:
       # TVH_BASE removed 2026-05-27 — tvh container is gone, tv-receiver
       # is the TV backend. The Python const TVH_BASE still exists as a

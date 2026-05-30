@@ -25,3 +25,14 @@ Even "simple" endpoints carry real Flask logic — e.g. `/api/channels` filters
 to the favourites (`.favorites.json`), it is NOT a raw tv-receiver passthrough.
 Read the Flask handler before porting; verify key-by-key against the live
 Flask response.
+
+## Redeploy after a Go change
+    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o /tmp/hls-gateway-go-arm64 .
+    scp /tmp/hls-gateway-go-arm64 pi:hls-gateway/hls-gateway-go
+    ssh pi 'cd ~/hls-gateway && docker compose up -d'   # or docker restart hls-gateway
+
+## CUTOVER DONE 2026-05-30
+Live: Caddy(:8443) → Go(:8080) → Flask(:8081). gateway-entrypoint.sh supervises
+both (either exits → container restarts). Revert: drop the `command:` line in
+docker-compose.yml. NOTE: service.py reload is now `docker restart hls-gateway`
+(or HUP the Flask pid) — a `docker kill -s HUP` now hits the bash wrapper, not Flask.
