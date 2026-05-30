@@ -818,6 +818,25 @@ def _migrate_favorites_from_tvh():
 
 
 def _read_favorites():
+    """Favourites now live in tv-receiver (source of truth, GET /api/favorites).
+    Fetch them from there and mirror to FAVORITES_FILE so the local copy stays
+    a fresh fallback. Fall back to that file (then the tvh-migration seed) only
+    if tv-receiver is unreachable or returns an empty set — never let a blip
+    silently disable favourite-filtering (= channel_map would balloon to all
+    channels)."""
+    try:
+        with urllib.request.urlopen(
+                f"{TV_RECEIVER_BASE}/api/favorites", timeout=4) as r:
+            slugs = json.load(r).get("slugs", [])
+        if slugs:
+            try:
+                FAVORITES_FILE.write_text(json.dumps({"slugs": slugs}, indent=2))
+            except Exception:
+                pass
+            return slugs
+    except Exception as e:
+        print(f"favorites: tv-receiver fetch failed ({e}), using {FAVORITES_FILE}",
+              flush=True)
     if not FAVORITES_FILE.exists():
         return _migrate_favorites_from_tvh()
     try:
