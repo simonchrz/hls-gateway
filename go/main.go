@@ -114,6 +114,11 @@ func main() {
 	mux.Handle("POST /api/internal/spot-fp/upload", recProxy)
 	mux.Handle("POST /api/internal/spot-fingerprints/rebuild", recProxy)
 	mux.Handle("POST /api/internal/spot-fingerprints/backfill-dhashes", recProxy)
+	// slice 6c — read-only learning-dashboard metrics. The scheduler-mutating
+	// /api/learning/* routes (auto-schedule-*, plan, fingerprint-scan/validate)
+	// stay on Flask via the catch-all below — a later (6d) slice.
+	mux.Handle("GET /api/learning/summary", recProxy)
+	mux.Handle("GET /api/learning/deletion-candidates", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
