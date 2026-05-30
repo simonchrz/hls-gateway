@@ -286,7 +286,7 @@
   on a FRESH IP (not after a test storm), retry the rewrite; if it still
   403s, try the downloader WITHOUT the YouTube `Cookie` header (the working
   direct-curl baseline sent no cookies). Then extend the smoke with a
-  full-speed yt-proxy segment check.
+  full-speed yt-proxy segment check. **DONE 2026-05-30 (fork de8ff1d):** rewriteToYtProxy re-enabled + chunked Range downloader + a 403->piped-proxy 302 fallback (degraded URLs redirect to streaming instead of 504; worst case = piped-proxy = prior behaviour). Segment caching is back -> the 846ms first-segment lever is unlocked. Verified live (modern+degraded 206 @ 2.4MB/s, cache hit 116MB/s, smoke green).
 
 - ~~**Smoke test for the Piped-Backend fork**~~ **DONE 2026-05-29 (commit
   `8c2729e` in simonchrz/Piped-Backend `ios-streaming-patches`).**
