@@ -70,6 +70,11 @@ func main() {
 	mux.Handle("GET /api/internal/detect-bumpers/", recProxy)
 	mux.Handle("GET /api/internal/detect-bumper/", recProxy)
 	mux.Handle("GET /api/internal/recording-uuids", recProxy)
+	// slice 2 — HLS-remux job queue (Mac offload). hls-segment is PUT,
+	// hls-done is POST, so route the whole prefix (any method) to tv-recorder.
+	mux.Handle("GET /api/internal/hls-pending", recProxy)
+	mux.Handle("/api/internal/hls-segment/", recProxy)
+	mux.Handle("/api/internal/hls-done/", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
