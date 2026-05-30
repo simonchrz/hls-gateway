@@ -153,6 +153,8 @@ func main() {
 	// slice 3c — redetect (re-queue detect) + show-start (drift marker).
 	mux.Handle("POST /api/recording/{uuid}/redetect", recProxy)
 	mux.Handle("POST /api/recording/{uuid}/show-start", recProxy)
+	// slice 3e — bumper-capture (ffmpeg frame extract + channel re-detect)
+	mux.Handle("POST /api/recording/{uuid}/bumper-capture", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
