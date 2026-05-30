@@ -130,6 +130,13 @@ func main() {
 	// recommendations engine) via the catch-all below.
 	mux.Handle("GET /api/learning/auto-schedule-log", recProxy)
 	mux.Handle("POST /api/learning/auto-schedule-pause", recProxy)
+	// slice 4a — auto-confirm verdict (read-only) + status/pause. The
+	// background apply-loop stays on Flask until slice 4b; the pause marker
+	// tv-recorder writes here is the file bridge Flask's loop reads.
+	mux.Handle("GET /api/internal/auto-confirm/status", recProxy)
+	mux.Handle("POST /api/internal/auto-confirm/pause", recProxy)
+	mux.Handle("GET /api/internal/auto-confirm-bulk", recProxy)
+	mux.Handle("GET /api/internal/auto-confirm/{uuid}", recProxy)
 	// slice 6f — external-app recordings library (list + single). Playability
 	// filter + flat app schema. /api/recording/<uuid>/* (singular) stays Flask.
 	mux.Handle("GET /api/recordings", recProxy)
