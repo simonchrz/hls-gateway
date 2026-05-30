@@ -87,6 +87,9 @@ func main() {
 	mux.Handle("/api/internal/detect-started/", recProxy)
 	mux.Handle("/api/internal/detect-give-up/", recProxy)
 	mux.Handle("/api/internal/cutlist-uploaded/", recProxy)
+	// housekeeping — disk reclaim the Mac daemon triggers on its GC/prefetch loop
+	mux.Handle("/api/internal/drop-pi-source/", recProxy)
+	mux.Handle("/api/internal/cleanup-orphans", recProxy)
 	// slice 6a — training orchestration (Mac trainer in/outputs)
 	mux.Handle("GET /api/internal/training-snapshot", recProxy)
 	mux.Handle("/api/internal/training-active", recProxy)

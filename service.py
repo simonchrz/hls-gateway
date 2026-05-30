@@ -4948,8 +4948,18 @@ def learning_page():
     # job (4-7 min wall) the poll loop pauses until the job finishes.
     # Generous thresholds so a mid-detect daemon shows GREEN with a
     # "busy" hint rather than warning.
-    daemon_age = int(time.time() - (_daemon_last_poll or 0))
-    if _daemon_last_poll == 0:
+    # Source of truth: the .daemon-last-poll file mtime — tv-recorder now
+    # serves the {thumbs,detect,hls}-pending polls and touches this file on
+    # every daemon poll (touchHeartbeat). Flask's in-memory _daemon_last_poll
+    # only ever gets bumped by the few poll routes still on Flask (live-ads),
+    # so reading it alone always showed "noch nie gepingt" post-migration.
+    last_poll = _daemon_last_poll or 0
+    try:
+        last_poll = max(last_poll, (HLS_DIR / ".daemon-last-poll").stat().st_mtime)
+    except OSError:
+        pass
+    daemon_age = int(time.time() - last_poll)
+    if last_poll == 0:
         d_color = "#e74c3c"; d_label = "noch nie gepingt"
     elif daemon_age <= 30:
         d_color = "#27ae60"; d_label = f"aktiv (letzter Ping vor {daemon_age}s)"
