@@ -2384,6 +2384,10 @@ def epg_grid():
             # a synthetic "arc_<slug>_<start>" key the lookup endpoint
             # understands — so yesterday's Tatort still gets Mediathek
             # even though tvheadend dropped it from its live EPG.
+            # data-slug disambiguates the record-event call: event_id is the
+            # start epoch and not unique across channels, so the server needs
+            # the slug to schedule the RIGHT channel for same-start events.
+            data_attrs += f' data-slug="{slug}"'
             if eid:
                 data_attrs += f' data-eid="{eid}"'
             elif is_past:
@@ -2638,7 +2642,7 @@ def epg_grid():
             f"      lpDialog({{msg:'Aufnahme planen?<br><br>'+ttl,"
             f"        buttons:dialogBtns}}).then(v=>{{"
             f"        release();"
-            f"        if(v==='ep')fetch('{HOST_URL}/record-event/'+el.dataset.eid)"
+            f"        if(v==='ep')fetch('{HOST_URL}/record-event/'+el.dataset.eid+'?slug='+(el.dataset.slug||''))"
             f"          .then(r=>r.json()).then(d=>{{"
             f"            if(d.ok){{"
             f"              /* Update the long-pressed cell immediately"
