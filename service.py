@@ -8568,247 +8568,12 @@ ARD_SEARCH_CHANNELS = {
 ZDF_SEARCH_CHANNELS = {"zdf-hd"}
 
 
-def _mediathek_match(title, ch_slug, start_ts):
-    """Core matcher used by both the lookup endpoint and the autorec
-    follow-up loop. Returns the best match dict (same shape as the
-    endpoint) or None. Title + channel slug + broadcast timestamp in,
-    match-with-HLS-capable-id out."""
-    if not title or not start_ts:
-        return None
-    if ch_slug in ARD_SEARCH_CHANNELS:
-        source = "ard"
-    elif ch_slug in ZDF_SEARCH_CHANNELS:
-        source = "zdf"
-    else:
-        return None
-    from datetime import datetime
-    MAX_DELTA = 48 * 3600
-    title_l = title.lower()
-    best = None
-    if source == "ard":
-        qs = urllib.parse.urlencode({
-            "searchString": title,
-            "searchResultsPageSize": "24",
-        })
-        search_url = (f"https://api.ardmediathek.de/page-gateway/pages/ard/"
-                      f"search?{qs}")
-        data = None
-        for attempt in range(2):
-            try:
-                data = json.loads(urllib.request.urlopen(
-                    search_url, timeout=15).read())
-                break
-            except Exception as e:
-                print(f"mediathek search (try {attempt+1}): {e}", flush=True)
-        if data is None:
-            return None
-        for v in data.get("vodResults", []):
-            svc = (v.get("publicationService") or {}).get("name", "")
-            vt = (v.get("longTitle") or v.get("mediumTitle") or "").strip()
-            vt_l = vt.lower()
-            if title_l not in vt_l and vt_l not in title_l:
-                continue
-            bt = 0
-            if v.get("broadcastedOn"):
-                try:
-                    bt = int(datetime.fromisoformat(
-                        v["broadcastedOn"].replace("Z", "+00:00")).timestamp())
-                except Exception:
-                    pass
-            if not bt or abs(bt - start_ts) > MAX_DELTA:
-                continue
-            delta = abs(bt - start_ts)
-            if best is None or delta < best["_delta"]:
-                avail_to = 0
-                if v.get("availableTo"):
-                    try:
-                        avail_to = int(datetime.fromisoformat(
-                            v["availableTo"].replace("Z", "+00:00")).timestamp())
-                    except Exception:
-                        pass
-                best = {
-                    "_delta": delta, "source": "ard",
-                    "title": vt, "channel": svc,
-                    "broadcast": bt, "available_to": avail_to,
-                    "duration": v.get("duration", 0),
-                    "id": v.get("id"),
-                    "player_url": f"https://www.ardmediathek.de/video/{v.get('id')}",
-                }
-    else:  # zdf
-        for r in _zdf_search(title):
-            rt = (r.get("title") or "").lower()
-            if title_l not in rt and rt not in title_l:
-                continue
-            if not r["broadcast_ts"]:
-                continue
-            delta = abs(r["broadcast_ts"] - start_ts)
-            if delta > MAX_DELTA:
-                continue
-            if best is None or delta < best["_delta"]:
-                best = {
-                    "_delta": delta, "source": "zdf",
-                    "title": r["title"], "channel": "ZDF",
-                    "broadcast": r["broadcast_ts"], "available_to": 0,
-                    "duration": r["duration"],
-                    "id": r["id"],
-                    "player_url": f"https://www.zdf.de/play/{r['id']}",
-                }
-    if not best:
-        return None
-    if best["source"] == "zdf" and not best["available_to"]:
-        _, vis_to = _zdf_resolve_hls(best["id"])
-        if vis_to:
-            best["available_to"] = vis_to
-    best.pop("_delta", None)
-    return best
-
-
-@app.route("/api/mediathek-lookup/<event_id>")
-def api_mediathek_lookup(event_id):
-    """For an EPG event, try to find the same show in the ARD
-    Mediathek and return its availability window + player URL."""
-    title, ch_name, start_ts = "", "", 0
-    # Synthetic archive key: arc_<slug>_<start> for past events that
-    # were archived before we started persisting the tvheadend eid.
-    if event_id.startswith("arc_"):
-        try:
-            _, slug_, start_s = event_id.split("_", 2)
-            start_ts = int(start_s)
-            with _epg_archive_lock:
-                rec = _epg_archive.get((slug_, start_ts)) or {}
-            title = rec.get("title", "")
-            with cmap_lock:
-                ch_name = channel_map.get(slug_, {}).get("name", slug_)
-        except Exception:
-            pass
-    else:
-        try:
-            ev = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}/api/epg/events/load?eventId={event_id}"
-                + (f"&slug={urllib.parse.quote(request.args.get('slug',''))}"
-                   if request.args.get('slug') else ""),
-                timeout=6).read())
-            entry = (ev.get("entries") or [{}])[0]
-            title = (entry.get("title") or "").strip()
-            ch_name = entry.get("channelName") or ""
-            start_ts = entry.get("start", 0)
-        except Exception:
-            pass
-        if not title:
-            try:
-                with _epg_archive_lock:
-                    for (slug_, start), rec in _epg_archive.items():
-                        if str(rec.get("event_id")) == str(event_id):
-                            title = rec.get("title", "")
-                            start_ts = start
-                            with cmap_lock:
-                                ch_name = (channel_map.get(slug_, {})
-                                            .get("name", slug_))
-                            break
-            except Exception:
-                pass
-    if not title:
-        return _cors(Response(json.dumps({"match": None}),
-                               mimetype="application/json"))
-    slug = slugify(ch_name)
-    if slug not in ARD_SEARCH_CHANNELS and slug not in ZDF_SEARCH_CHANNELS:
-        return _cors(Response(json.dumps({
-            "match": None, "reason": "channel not covered"}),
-            mimetype="application/json"))
-    match = _mediathek_match(title, slug, start_ts)
-    return _cors(Response(json.dumps({"match": match}),
-                           mimetype="application/json"))
 
 
 
 
-@app.route("/api/mediathek-schedule/<event_id>", methods=["POST"])
-def api_mediathek_schedule(event_id):
-    """Store a virtual recording that streams from ARD Mediathek on
-    playback. Uses the lookup we already have, resolves the item's
-    HLS master URL, and saves a local stub so /recordings + the
-    recording player pick it up."""
-    ev_title, ch_name, ev_start, ev_stop = "", "", 0, 0
-    if event_id.startswith("arc_"):
-        try:
-            _, slug_, start_s = event_id.split("_", 2)
-            ev_start = int(start_s)
-            with _epg_archive_lock:
-                rec = _epg_archive.get((slug_, ev_start)) or {}
-            ev_title = rec.get("title", "")
-            ev_stop = rec.get("stop", 0)
-            with cmap_lock:
-                ch_name = channel_map.get(slug_, {}).get("name", slug_)
-        except Exception:
-            pass
-    else:
-        try:
-            ev = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}/api/epg/events/load?eventId={event_id}"
-                + (f"&slug={urllib.parse.quote(request.args.get('slug',''))}"
-                   if request.args.get('slug') else ""),
-                timeout=6).read())
-            entry = (ev.get("entries") or [{}])[0]
-            ev_title = (entry.get("title") or "").strip()
-            ch_name = entry.get("channelName") or ""
-            ev_start = entry.get("start", 0)
-            ev_stop = entry.get("stop", 0)
-        except Exception:
-            pass
-        if not ev_title:
-            with _epg_archive_lock:
-                for (slug_, start), rec in _epg_archive.items():
-                    if str(rec.get("event_id")) == str(event_id):
-                        ev_title = rec.get("title", "")
-                        ev_start = start
-                        ev_stop = rec.get("stop", 0)
-                        with cmap_lock:
-                            ch_name = (channel_map.get(slug_, {})
-                                        .get("name", slug_))
-                        break
-    if not ev_title:
-        return Response(json.dumps({"ok": False,
-                                     "error": "event not found"}),
-                        status=404, mimetype="application/json")
-    # Re-run the lookup. Loopback HTTP is simpler than refactoring
-    # the matcher into a shared helper for one more caller.
-    try:
-        res = urllib.request.urlopen(
-            f"http://localhost:8080/api/mediathek-lookup/{event_id}",
-            timeout=8).read()
-        match = json.loads(res).get("match")
-    except Exception as e:
-        return Response(json.dumps({"ok": False, "error": f"match: {e}"}),
-                        status=500, mimetype="application/json")
-    if not match or not match.get("id"):
-        return Response(json.dumps({"ok": False,
-                                     "error": "no mediathek match"}),
-                        status=404, mimetype="application/json")
-    hls_url = _resolve_mediathek_hls(match["id"],
-                                       source=match.get("source", "ard"))
-    if not hls_url:
-        return Response(json.dumps({"ok": False,
-                                     "error": "no hls url"}),
-                        status=500, mimetype="application/json")
-    import uuid as uuid_mod
-    vuuid = "mt_" + uuid_mod.uuid4().hex[:16]
-    with _mediathek_rec_lock:
-        _mediathek_rec[vuuid] = {
-            "title": match.get("title") or ev_title,
-            "channel": ch_name,
-            "start": ev_start,
-            "stop": ev_stop,
-            "hls_url": hls_url,
-            "available_to": match.get("available_to", 0),
-            "eid": event_id,
-            "created_at": int(time.time()),
-        }
-    save_mediathek_rec()
-    return _cors(Response(json.dumps({
-        "ok": True, "uuid": vuuid,
-        "title": _mediathek_rec[vuuid]["title"],
-        "available_to": _mediathek_rec[vuuid]["available_to"],
-    }), mimetype="application/json"))
+
+
 
 
 
@@ -9804,61 +9569,6 @@ def recordings_page():
                    + '</tbody></table></details></td></tr>')
         rows.append(summary)
 
-    # Virtual Mediathek recordings — stream via hls.js on play. Sorted
-    # newest-first, with an expiry reminder.
-    with _mediathek_rec_lock:
-        mt_entries = [(k, v) for k, v in _mediathek_rec.items()]
-    mt_entries.sort(key=lambda kv: kv[1].get("created_at", 0), reverse=True)
-    from datetime import datetime as _dt
-    for vuuid, m in mt_entries:
-        mt_title = m.get("title", "?").replace("<", "&lt;")
-        when = time.strftime("%d.%m %H:%M",
-                              time.localtime(m.get("start", 0)))
-        dur_min = max(0, (m.get("stop", 0) - m.get("start", 0)) // 60)
-        avail_to = m.get("available_to", 0)
-        avail_str = ""
-        if avail_to:
-            try:
-                avail_str = _dt.fromtimestamp(avail_to).strftime("%d.%m.%Y")
-            except Exception:
-                pass
-        expired = avail_to and now_ts > avail_to
-        # Ripped MP4 takes over once V3's background worker finishes —
-        # playable forever after that, no remote HLS dependency.
-        ripped_path = m.get("ripped_path", "")
-        has_local = (ripped_path and
-                     (HLS_DIR / f"_{vuuid}" / "file.mp4").exists())
-        if has_local:
-            mt_badge = '<span class="badge mediathek local">💾 Mediathek lokal</span>'
-        elif expired:
-            mt_badge = '<span class="badge expired">✗ abgelaufen</span>'
-        else:
-            mt_badge = '<span class="badge mediathek">📡 Mediathek</span>'
-        if has_local:
-            size_mb = (m.get("ripped_bytes", 0) or 0) / (1024 * 1024)
-            avail_cell = f'<small>lokal ({size_mb:.0f} MB)</small>'
-        elif avail_str and not expired:
-            avail_cell = (f'<small style="color:var(--muted)">bis '
-                          f'{avail_str}</small>')
-        elif expired:
-            avail_cell = '<small>abgelaufen</small>'
-        else:
-            avail_cell = ''
-        if expired and not has_local:
-            title_cell = f'<span>{mt_title}</span>'
-        else:
-            title_cell = f'<a href="{HOST_URL}/recording/{vuuid}">{mt_title}</a>'
-        if avail_cell:
-            title_cell += f'<br>{avail_cell}'
-        rows.append(
-            f'<tr><td>{mt_badge}</td>'
-            f'<td>{title_cell}</td>'
-            f'<td>{when}</td>'
-            f'<td>{dur_min} min</td>'
-            f'<td class="row-tools">'
-            f'<a class="del-btn" href="{HOST_URL}/mediathek-rec/{vuuid}/delete" '
-            f'data-title="{mt_title.replace(chr(34),"&quot;")}" '
-            f'data-mt="1">🗑</a></td></tr>')
 
     body = (f"<html><head><meta name='viewport' "
             f"content='width=device-width,initial-scale=1'>"
@@ -11453,30 +11163,10 @@ _live_ads_lock = threading.Lock()
 _live_ads = {}   # slug -> {"generated": ts, "ads": [[wall_start, wall_stop], ...]}
 _live_ads_proc = {"slug": None, "started": 0}
 LIVE_ADS_FILE = HLS_DIR / ".live_ads.json"
-MEDIATHEK_REC_FILE = HLS_DIR / ".mediathek_recordings.json"
-_mediathek_rec_lock = threading.Lock()
-_mediathek_rec = {}  # uuid -> {title, channel, start, stop, hls_url,
-                     #         available_to, eid, created_at}
 
 
-def load_mediathek_rec():
-    if not MEDIATHEK_REC_FILE.exists():
-        return
-    try:
-        with _mediathek_rec_lock:
-            _mediathek_rec.update(json.loads(MEDIATHEK_REC_FILE.read_text()))
-        print(f"Loaded {len(_mediathek_rec)} mediathek recordings", flush=True)
-    except Exception as e:
-        print(f"load mediathek recordings: {e}", flush=True)
 
 
-def save_mediathek_rec():
-    try:
-        with _mediathek_rec_lock:
-            snap = dict(_mediathek_rec)
-        MEDIATHEK_REC_FILE.write_text(json.dumps(snap))
-    except Exception as e:
-        print(f"save mediathek recordings: {e}", flush=True)
 
 
 # V3 — pre-expiry rip of virtual Mediathek recordings to a local MP4.
@@ -11488,331 +11178,20 @@ RIP_LOAD_CAP = 8.0
 RIP_MIN_FREE_GB = 5.0   # don't start a new rip if <5 GB free on /mnt/tv
 
 
-def _mediathek_rip_file(vuuid):
-    """Absolute path for the ripped MP4 of a virtual recording."""
-    return HLS_DIR / f"_{vuuid}" / "file.mp4"
 
 
-def _rip_mediathek(vuuid):
-    """Run ffmpeg to fetch the Mediathek HLS stream into a local MP4.
-    Copy-mux only (no re-encode). Records success / failure back in
-    the state dict."""
-    with _mediathek_rec_lock:
-        entry = dict(_mediathek_rec.get(vuuid) or {})
-    hls_url = entry.get("hls_url")
-    if not hls_url:
-        return False
-    out_dir = HLS_DIR / f"_{vuuid}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / "file.mp4"
-    tmp_file = out_dir / "file.mp4.part"
-    print(f"[mt-rip {vuuid[:10]}] starting → {out_file}", flush=True)
-    base = ["nice", "-n", "15", "ffmpeg", "-y",
-             "-hide_banner", "-loglevel", "warning",
-             "-i", hls_url,
-             "-bsf:a", "aac_adtstoasc",
-             "-movflags", "+faststart",
-             "-f", "mp4", str(tmp_file)]
-    # First pass: pure -c copy (fastest, lossless). If that rejects the
-    # stream (sometimes MP4 muxer complains about ADTS headers or
-    # private-stream metadata), retry with audio re-encoded to AAC.
-    attempts = [
-        ["-c", "copy"],
-        ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"],
-    ]
-    r = None
-    for opts in attempts:
-        cmd = base[:8] + opts + base[8:]
-        # Drop any leftover .part from previous attempt
-        try: tmp_file.unlink()
-        except Exception: pass
-        try:
-            r = subprocess.run(cmd, timeout=3600, check=False,
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.PIPE)
-        except Exception as e:
-            print(f"[mt-rip {vuuid[:10]}] exception: {e}", flush=True)
-            return False
-        if (r.returncode == 0 and tmp_file.exists()
-            and tmp_file.stat().st_size >= 1_000_000):
-            break
-        err_short = (r.stderr or b"")[-200:].decode("utf-8", "replace").strip()
-        print(f"[mt-rip {vuuid[:10]}] copy attempt failed "
-              f"(rc={r.returncode}), retrying with audio re-encode: "
-              f"{err_short}", flush=True)
-    if r.returncode != 0 or not tmp_file.exists() \
-       or tmp_file.stat().st_size < 1_000_000:
-        err = (r.stderr or b"")[-500:].decode("utf-8", "replace").strip()
-        print(f"[mt-rip {vuuid[:10]}] failed rc={r.returncode} {err}",
-              flush=True)
-        with _mediathek_rec_lock:
-            if vuuid in _mediathek_rec:
-                _mediathek_rec[vuuid]["rip_error"] = err[:200] or "unknown"
-                _mediathek_rec[vuuid]["rip_attempt_at"] = int(time.time())
-        save_mediathek_rec()
-        try: tmp_file.unlink()
-        except Exception: pass
-        return False
-    tmp_file.rename(out_file)
-    size = out_file.stat().st_size
-    with _mediathek_rec_lock:
-        if vuuid in _mediathek_rec:
-            _mediathek_rec[vuuid]["ripped_path"] = str(out_file)
-            _mediathek_rec[vuuid]["ripped_at"] = int(time.time())
-            _mediathek_rec[vuuid]["ripped_bytes"] = size
-            _mediathek_rec[vuuid].pop("rip_error", None)
-    save_mediathek_rec()
-    print(f"[mt-rip {vuuid[:10]}] done {size/1e6:.1f} MB", flush=True)
-    return True
 
 
-def _mediathek_rip_loop():
-    time.sleep(120)
-    while True:
-        try:
-            now = time.time()
-            try:
-                load = os.getloadavg()[0]
-            except Exception:
-                load = 0
-            if load <= RIP_LOAD_CAP:
-                # Disk-full guard — don't start a new multi-GB rip if
-                # the SSD is almost full. 5 GB floor so in-flight
-                # recordings + tvheadend DVR still have room.
-                try:
-                    free_gb = shutil.disk_usage(HLS_DIR).free / (1024 ** 3)
-                except Exception:
-                    free_gb = 0
-                if free_gb < RIP_MIN_FREE_GB:
-                    print(f"mt-rip: only {free_gb:.1f} GB free, "
-                          f"deferring", flush=True)
-                    time.sleep(3600)
-                    continue
-                with _mediathek_rec_lock:
-                    todo = [
-                        u for u, v in _mediathek_rec.items()
-                        if not v.get("ripped_path")
-                        and v.get("available_to")
-                        and (v["available_to"] - now) < RIP_THRESHOLD_SECONDS
-                        and (v["available_to"] - now) > 60  # still playable
-                        # don't retry a recent failure within 6 h
-                        and (now - v.get("rip_attempt_at", 0)) > 6 * 3600
-                    ]
-                if todo:
-                    # One at a time to keep disk I/O polite.
-                    _rip_mediathek(todo[0])
-        except Exception as e:
-            print(f"mt-rip loop: {e}", flush=True)
-        time.sleep(3600)
 
 
-def _mediathek_autorec_once():
-    """One pass: for every autorec-spawned DVR entry on a Mediathek-
-    covered channel that we don't yet have a virtual for, attempt the
-    match and schedule a virtual recording. The rip loop then picks
-    it up before expiry."""
-    try:
-        data = json.loads(urllib.request.urlopen(
-            f"{dvr_base()}/api/dvr/entry/grid?limit=500",
-            timeout=10).read())
-    except Exception as e:
-        print(f"mt-autorec fetch: {e}", flush=True)
-        return
-    with _mediathek_rec_lock:
-        existing = {m.get("tvh_entry") for m in _mediathek_rec.values()
-                    if m.get("tvh_entry")}
-    import uuid as uuid_mod
-    created = 0
-    for e in data.get("entries", []):
-        if not e.get("autorec"):
-            continue
-        tvh_uuid = e.get("uuid")
-        if not tvh_uuid or tvh_uuid in existing:
-            continue
-        ch_name = e.get("channelname") or ""
-        slug = slugify(ch_name)
-        if (slug not in ARD_SEARCH_CHANNELS
-            and slug not in ZDF_SEARCH_CHANNELS):
-            continue
-        title = e.get("disp_title") or e.get("title") or ""
-        start = e.get("start", 0)
-        stop = e.get("stop", 0)
-        if not title or not start:
-            continue
-        match = _mediathek_match(title, slug, start)
-        if not match or not match.get("id"):
-            continue
-        hls_url = _resolve_mediathek_hls(
-            match["id"], source=match.get("source", "ard"))
-        if not hls_url:
-            continue
-        vuuid = "mt_" + uuid_mod.uuid4().hex[:16]
-        with _mediathek_rec_lock:
-            _mediathek_rec[vuuid] = {
-                "title": match.get("title") or title,
-                "channel": ch_name,
-                "start": start,
-                "stop": stop,
-                "hls_url": hls_url,
-                "available_to": match.get("available_to", 0),
-                "eid": f"autorec_{tvh_uuid}",
-                "tvh_entry": tvh_uuid,
-                "autorec": e.get("autorec"),
-                "created_at": int(time.time()),
-            }
-        save_mediathek_rec()
-        created += 1
-        print(f"[mt-autorec] scheduled virtual for "
-              f"'{title}' on {ch_name} → {vuuid}", flush=True)
-    if created:
-        print(f"[mt-autorec] pass complete: {created} virtual(s) added",
-              flush=True)
 
 
-def _mediathek_autorec_loop():
-    time.sleep(300)   # let tvheadend populate its upcoming list
-    while True:
-        try:
-            _mediathek_autorec_once()
-        except Exception as e:
-            print(f"mt-autorec loop: {e}", flush=True)
-        time.sleep(3600)
 
 
-def _zdf_search(title):
-    """Search ZDF Mediathek for episodes matching `title`. Returns a
-    list of dicts {id, title, broadcast_ts, available_to, duration}."""
-    qs = urllib.parse.urlencode({
-        "q": title, "contentTypes": "episode", "limit": "24",
-    })
-    url = f"https://api.zdf.de/search/documents?{qs}"
-    req = urllib.request.Request(url, headers={
-        "api-auth": f"Bearer {ZDF_API_TOKEN}",
-    })
-    from datetime import datetime
-    out = []
-    for attempt in range(2):
-        try:
-            data = json.loads(urllib.request.urlopen(req, timeout=15).read())
-            for r in data.get("http://zdf.de/rels/search/results", []):
-                t = r.get("http://zdf.de/rels/target", {})
-                ed = t.get("editorialDate") or ""
-                bt = 0
-                if ed:
-                    try:
-                        bt = int(datetime.fromisoformat(
-                            ed.replace("Z", "+00:00")).timestamp())
-                    except Exception:
-                        pass
-                out.append({
-                    "id": t.get("id"),
-                    "title": t.get("teaserHeadline") or t.get("title") or "",
-                    "broadcast_ts": bt,
-                    "available_to": 0,   # filled in from item details on demand
-                    "duration": t.get("duration", 0),
-                })
-            return out
-        except Exception as e:
-            print(f"zdf search (try {attempt+1}): {e}", flush=True)
-    return out
 
 
-def _zdf_resolve_hls(canonical_id):
-    """Given a ZDF search id (e.g. 'heute-journal-vom-19-april-2026-100'),
-    walk content doc → ptmd template → manifest → HLS URL. Also
-    returns the `visibleTo` expiry so the caller can use it as
-    available_to if the search result didn't have it."""
-    req = urllib.request.Request(
-        f"https://api.zdf.de/content/documents/{canonical_id}.json",
-        headers={"api-auth": f"Bearer {ZDF_API_TOKEN}"})
-    try:
-        item = json.loads(urllib.request.urlopen(req, timeout=15).read())
-    except Exception as e:
-        print(f"zdf item: {e}", flush=True)
-        return None, 0
-    mvc = (item.get("mainVideoContent") or {}).get(
-        "http://zdf.de/rels/target") or {}
-    tmpl = mvc.get("http://zdf.de/rels/streams/ptmd-template", "")
-    vis_to = 0
-    from datetime import datetime
-    if mvc.get("visibleTo"):
-        try:
-            vis_to = int(datetime.fromisoformat(
-                mvc["visibleTo"].replace("Z", "+00:00")).timestamp())
-        except Exception:
-            pass
-    if not tmpl:
-        return None, vis_to
-    ptmd_url = ("https://api.zdf.de"
-                + tmpl.replace("{playerId}", "ngplayer_2_4"))
-    req = urllib.request.Request(ptmd_url, headers={
-        "api-auth": f"Bearer {ZDF_API_TOKEN}"})
-    try:
-        ptmd = json.loads(urllib.request.urlopen(req, timeout=15).read())
-    except Exception as e:
-        print(f"zdf ptmd: {e}", flush=True)
-        return None, vis_to
-    # Walk priorityList → formitaeten → qualities → audio/tracks → uri
-    import re
-    hls_url = None
-    for pri in ptmd.get("priorityList", []):
-        for f in pri.get("formitaeten", []):
-            if f.get("type") != "hls":
-                continue
-            for q in f.get("qualities", []):
-                for a in q.get("audio", {}).get("tracks", []):
-                    u = a.get("uri") or ""
-                    if ".m3u8" in u:
-                        hls_url = u
-                        break
-                if hls_url: break
-            if hls_url: break
-        if hls_url: break
-    if not hls_url:
-        # Fallback: scan the whole response for any m3u8
-        m = re.search(r'https?://[^"\s]+\.m3u8[^"\s]*', json.dumps(ptmd))
-        if m:
-            hls_url = m.group(0)
-    return hls_url, vis_to
 
 
-def _resolve_mediathek_hls(item_id, source="ard"):
-    """Resolve an HLS master URL for a Mediathek match. Dispatches on
-    `source`: ARD uses the page-gateway item endpoint, ZDF uses the
-    PTMD manifest chain. ARD's item endpoint is occasionally slow
-    (>6 s); retry once on timeout."""
-    if source == "zdf":
-        hls, _ = _zdf_resolve_hls(item_id)
-        return hls
-    url = (f"https://api.ardmediathek.de/page-gateway/pages/ard/"
-           f"item/{item_id}?devicetype=pc&embedded=true")
-    for attempt in range(2):
-        try:
-            data = json.loads(
-                urllib.request.urlopen(url, timeout=15).read())
-            # Scan every stream/media entry for a .m3u8 URL — the order
-            # isn't guaranteed across shows.
-            for stream in (data.get("widgets", [{}])[0]
-                               .get("mediaCollection", {})
-                               .get("embedded", {})
-                               .get("streams", [])):
-                for m in stream.get("media", []):
-                    u = m.get("url", "")
-                    if ".m3u8" in u:
-                        return u
-            # Fallback: any forcedLabel "Auto" entry even without .m3u8
-            for stream in (data.get("widgets", [{}])[0]
-                               .get("mediaCollection", {})
-                               .get("embedded", {})
-                               .get("streams", [])):
-                for m in stream.get("media", []):
-                    if m.get("forcedLabel") == "Auto":
-                        return m.get("url")
-            return None
-        except Exception as e:
-            print(f"mediathek hls resolve (try {attempt+1}): {e}",
-                  flush=True)
-    return None
 
 
 def load_live_ads():
@@ -14852,15 +14231,17 @@ def mediathek_play(event_id):
     "Jetzt abspielen" shortcut for past shows you just want to watch."""
     try:
         res = urllib.request.urlopen(
-            f"http://localhost:8080/api/mediathek-lookup/{event_id}",
+            f"{dvr_base()}/api/mediathek-lookup/{event_id}"
+            + (f"?slug={urllib.parse.quote(request.args.get('slug',''))}"
+               if request.args.get("slug") else ""),
             timeout=35).read()
         match = json.loads(res).get("match")
     except Exception as e:
         abort(502, f"lookup: {e}")
     if not match or not match.get("id"):
         abort(404, "no mediathek match")
-    hls_url = _resolve_mediathek_hls(match["id"],
-                                       source=match.get("source", "ard"))
+    # tv-receiver's native lookup already resolved the HLS URL.
+    hls_url = match.get("hls_url")
     if not hls_url:
         abort(502, "no hls url")
     entry = {
@@ -14874,14 +14255,7 @@ def mediathek_play(event_id):
 @app.route("/recording/<uuid>")
 def play_recording(uuid):
     """Player page for a DVR recording — wraps tvheadend's dvrfile in
-    a styled <video> so iOS Safari doesn't force native fullscreen.
-    Virtual mt_* UUIDs stream directly from ARD Mediathek via hls.js."""
-    if uuid.startswith("mt_"):
-        with _mediathek_rec_lock:
-            entry = _mediathek_rec.get(uuid)
-        if not entry:
-            abort(404, "unknown mediathek recording")
-        return _render_mediathek_player(uuid, entry)
+    a styled <video> so iOS Safari doesn't force native fullscreen."""
     title = "Aufnahme"
     try:
         data = json.loads(urllib.request.urlopen(
@@ -15839,34 +15213,8 @@ def play_recording(uuid):
     return html
 
 
-@app.route("/mediathek-rec/<uuid>/file.mp4")
-def mediathek_rec_file(uuid):
-    """Serve a ripped Mediathek recording. send_from_directory handles
-    HTTP range requests correctly, which iOS needs for MP4 seeking."""
-    out_dir = HLS_DIR / f"_{uuid}"
-    if not (out_dir / "file.mp4").exists():
-        abort(404)
-    return send_from_directory(out_dir, "file.mp4",
-                                  mimetype="video/mp4",
-                                  conditional=True)
 
 
-@app.route("/mediathek-rec/<uuid>/delete", methods=["DELETE"])
-def delete_mediathek_rec(uuid):
-    """Drop a virtual Mediathek recording from the local list. Also
-    cleans up the ripped MP4 if one exists — the whole point of
-    "delete" is freeing the disk.
-
-    DELETE-only since 2026-05-03: prevents the smoke-route hitter
-    + accidental browser-prefetch from triggering deletion via a
-    bare GET. UI uses fetch(method:'DELETE') from the global
-    .del-btn click handler in the recordings page."""
-    with _mediathek_rec_lock:
-        _mediathek_rec.pop(uuid, None)
-    save_mediathek_rec()
-    shutil.rmtree(HLS_DIR / f"_{uuid}", ignore_errors=True)
-    return _cors(Response(json.dumps({"ok": True}),
-                          mimetype="application/json"))
 
 
 
@@ -18652,7 +18000,6 @@ if __name__ == "__main__":
     load_favorites()
     load_always_warm()
     load_live_ads()
-    load_mediathek_rec()
     _adaptive_padding_load()
     adopt_surviving_ffmpegs()
     signal.signal(signal.SIGHUP, _sighup_reload)
@@ -18732,8 +18079,6 @@ if __name__ == "__main__":
     # + resume-at-boot are no-ops now (kept callable for one-off
     # diagnostics if needed; just don't start them automatically).
     threading.Thread(target=always_warm_loop, daemon=True).start()
-    threading.Thread(target=_mediathek_rip_loop, daemon=True).start()
-    threading.Thread(target=_mediathek_autorec_loop, daemon=True).start()
     threading.Thread(target=ffmpeg_watchdog_loop, daemon=True).start()
     threading.Thread(target=disk_cleanup_loop, daemon=True).start()
     threading.Thread(target=state_backup_loop, daemon=True).start()
