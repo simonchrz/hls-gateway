@@ -193,6 +193,12 @@ func main() {
 	mux.Handle("/api/live-ads-stream/", recvProxy) // SSE push
 	mux.Handle("/api/internal/live-ads", recvProxy) // Mac GET|POST store
 	mux.Handle("/api/warm-status", recvProxy)
+	// poster scraper → tv-recorder (:9984, recProxy — NOT tv-receiver). The
+	// show/episode poster cascade (fernsehserien→TMDB→TVmaze + og:image) + the
+	// hourly epg-enrich loop live in cmd/tv-recorder alongside the epg_meta
+	// readers (series/recordings). App/EPG poster_url lazy-302s land here.
+	mux.Handle("/api/poster/show", recProxy)
+	mux.Handle("/api/poster/episode", recProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)

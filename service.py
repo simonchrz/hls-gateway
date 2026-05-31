@@ -17794,7 +17794,11 @@ if __name__ == "__main__":
     # control over recording lifetime, no auto-delete after watched+N-days.
     # threading.Thread(target=_cleanup_watched_loop, daemon=True).start()
     _load_epg_meta()
-    threading.Thread(target=_enrich_recordings_loop, daemon=True).start()
+    # EPG-meta enrich (poster/rating/kind scraper). Ported to tv-recorder; set
+    # EPG_ENRICH_OWNER=recorder to disable Flask's loop and avoid both fetching
+    # the same titles (= double upstream load + .epg_meta.json write races).
+    if os.environ.get("EPG_ENRICH_OWNER", "flask") == "flask":
+        threading.Thread(target=_enrich_recordings_loop, daemon=True).start()
     # waitress in production; fall back to Flask's built-in only if
     # waitress somehow isn't importable (e.g. an older image).
     try:

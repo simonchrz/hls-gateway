@@ -83,6 +83,11 @@ services:
       # Mac daemon runs HLS_PARALLEL=2 and is always-on, so the marker
       # always gets picked up — just not instantly during ML bursts.
       - HLS_FALLBACK_S=0
+      # EPG-meta enrich (poster/rating/kind scraper) ported to tv-recorder.
+      # recorder = tv-recorder owns the hourly loop + .epg_meta.json; flask =
+      # Flask runs it (default in code). Set to recorder to stop Flask's loop
+      # so the two don't double-fetch / race on the .epg_meta.json write.
+      - EPG_ENRICH_OWNER=recorder
       # Optional: TMDB v4 Bearer token for recordings-page EPG
       # enrichment (poster + rating). Picked up from .env next to
       # this file; falls back to TVmaze when unset.
