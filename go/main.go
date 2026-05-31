@@ -132,6 +132,7 @@ func main() {
 	// /api/learning/* routes (auto-schedule-*, plan, fingerprint-scan/validate)
 	// stay on Flask via the catch-all below — a later (6d) slice.
 	mux.Handle("GET /api/learning/summary", recProxy)
+	mux.Handle("GET /api/learning/detail", recProxy) // per-section dashboard data for the app
 	mux.Handle("GET /api/learning/deletion-candidates", recProxy)
 	// slice 6d — show-fingerprint auto-confirm (scan + leave-one-out validate).
 	// EPG/DVR-mutating learning routes (plan, auto-schedule-*) stay on Flask.
