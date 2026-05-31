@@ -2609,7 +2609,7 @@ def epg_grid():
             # only be retrieved via Mediathek, so we build a different
             # button list for them (no DVR options).
             f"    const mtFetch=fetch('{HOST_URL}/api/mediathek-lookup/'"
-            f"+el.dataset.eid).then(r=>r.json()).catch(()=>({{match:null}}));"
+            f"+el.dataset.eid+'?slug='+(el.dataset.slug||'')).then(r=>r.json()).catch(()=>({{match:null}}));"
             f"    const dialogBtns=isPast?[]:[{{label:'Einzelne Episode',"
             f"value:'ep',primary:true}},{{label:'Ganze Serie',value:'series'}}];"
             f"    dialogBtns.push({{label:'Abbrechen',value:''}});"
@@ -2655,7 +2655,7 @@ def epg_grid():
             f"              syncScheduledFromUpcoming();"
             f"            }}"
             f"          }}).catch(()=>{{}});"
-            f"        else if(v==='series')fetch('{HOST_URL}/record-series/'+el.dataset.eid)"
+            f"        else if(v==='series')fetch('{HOST_URL}/record-series/'+el.dataset.eid+'?slug='+(el.dataset.slug||''))"
             f"          .then(r=>r.json()).then(d=>{{"
             f"            if(d.ok){{"
             f"              /* Series scheduling can plant green dots on"
@@ -2678,7 +2678,7 @@ def epg_grid():
             f"        else if(v==='play')"
             f"          location.href='{HOST_URL}/mediathek-play/'+el.dataset.eid;"
             f"        else if(v==='mediathek')"
-            f"          fetch('{HOST_URL}/api/mediathek-schedule/'+el.dataset.eid,"
+            f"          fetch('{HOST_URL}/api/mediathek-schedule/'+el.dataset.eid+'?slug='+(el.dataset.slug||''),"
             f"            {{method:'POST'}})"
             f"            .then(r=>r.json()).then(d=>{{"
             f"              if(d.ok)lpDialog({{msg:'<b>'+d.title+"
@@ -9132,7 +9132,9 @@ def api_mediathek_lookup(event_id):
     else:
         try:
             ev = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}/api/epg/events/load?eventId={event_id}",
+                f"{dvr_base()}/api/epg/events/load?eventId={event_id}"
+                + (f"&slug={urllib.parse.quote(request.args.get('slug',''))}"
+                   if request.args.get('slug') else ""),
                 timeout=6).read())
             entry = (ev.get("entries") or [{}])[0]
             title = (entry.get("title") or "").strip()
@@ -9190,7 +9192,9 @@ def api_mediathek_schedule(event_id):
     else:
         try:
             ev = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}/api/epg/events/load?eventId={event_id}",
+                f"{dvr_base()}/api/epg/events/load?eventId={event_id}"
+                + (f"&slug={urllib.parse.quote(request.args.get('slug',''))}"
+                   if request.args.get('slug') else ""),
                 timeout=6).read())
             entry = (ev.get("entries") or [{}])[0]
             ev_title = (entry.get("title") or "").strip()
@@ -9263,7 +9267,9 @@ def record_series(event_id):
     # Resolve event → title + channel
     try:
         ev = json.loads(urllib.request.urlopen(
-            f"{dvr_base()}/api/epg/events/load?eventId={event_id}",
+            f"{dvr_base()}/api/epg/events/load?eventId={event_id}"
+            + (f"&slug={urllib.parse.quote(request.args.get('slug',''))}"
+               if request.args.get('slug') else ""),
             timeout=6).read())
         entry = (ev.get("entries") or [{}])[0]
         title = entry.get("title")
