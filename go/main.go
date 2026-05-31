@@ -49,6 +49,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("bad -tv-recorder url: %v", err)
 	}
+	receiver, err := url.Parse(*tvReceiver)
+	if err != nil {
+		log.Fatalf("bad -tv-receiver url: %v", err)
+	}
 
 	s := &server{
 		flask:      flask,
@@ -179,6 +183,16 @@ func main() {
 	mux.Handle("POST /api/recording/{uuid}/bumper-capture", recProxy)
 	// slice 3f — trim (lossless ffmpeg cut, replaces source) — DESTRUCTIVE
 	mux.Handle("POST /api/recording/{uuid}/trim", recProxy)
+	// live-TV ad-skip + warm-status → tv-receiver (slice live-ads/warm-status).
+	// live-ads is now owned by tv-receiver (per-channel read, SSE push, and the
+	// Mac daemon's whole-file store at .live_ads.json). The Mac posts to :8080;
+	// these forward it on. warm-status is the slim host/disk/tuner status the
+	// HA disk alert reads. NOTE these point at tv-receiver (:9983), not Flask.
+	recvProxy := httputil.NewSingleHostReverseProxy(receiver)
+	mux.Handle("/api/live-ads/", recvProxy)        // GET /api/live-ads/<slug>
+	mux.Handle("/api/live-ads-stream/", recvProxy) // SSE push
+	mux.Handle("/api/internal/live-ads", recvProxy) // Mac GET|POST store
+	mux.Handle("/api/warm-status", recvProxy)
 	// --- Everything else still belongs to Flask (incl. /api/channels,
 	//     which applies the favourites filter — a later slice) ---
 	mux.HandleFunc("/", s.proxy.ServeHTTP)
