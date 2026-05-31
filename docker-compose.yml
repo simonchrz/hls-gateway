@@ -88,6 +88,13 @@ services:
       # Flask runs it (default in code). Set to recorder to stop Flask's loop
       # so the two don't double-fetch / race on the .epg_meta.json write.
       - EPG_ENRICH_OWNER=recorder
+      # Daily auto-scheduler + 5-min auto-confirm loops are owned by tv-recorder
+      # (-auto-sched-loop / -auto-confirm-loop). Without these, Flask defaults to
+      # "flask" and runs them TOO -> double-scheduling + double auto-confirm.
+      # (These were the documented gate for slices 6h/4b but had never actually
+      # been deployed to this compose — added 2026-05-31 with the poster slice.)
+      - AUTO_SCHED_LOOP_OWNER=recorder
+      - AUTO_CONFIRM_LOOP_OWNER=recorder
       # Optional: TMDB v4 Bearer token for recordings-page EPG
       # enrichment (poster + rating). Picked up from .env next to
       # this file; falls back to TVmaze when unset.
