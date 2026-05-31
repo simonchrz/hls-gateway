@@ -57,6 +57,9 @@ services:
       # explicitly sets DVR_BACKEND=tvh, which would also need to bring
       # the container back).
       - DVR_BACKEND=local
+      # FLASK_OFF=1 runs go-front alone (Flask retirement test / shutdown).
+      # Default 0 = both run. Flip per-run: FLASK_OFF=1 docker compose up -d.
+      - FLASK_OFF=${FLASK_OFF:-0}
       - HOST_URL=https://raspberrypi5lan:8443
       - IDLE_TIMEOUT=30
       - FAV_TAG_UUID=ed43d130b6d7f8e56b063db6de8d2b06

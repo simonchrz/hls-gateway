@@ -18,8 +18,17 @@ set -u
 
 echo "[entrypoint] strangler-fig: Flask backend :8081 + Go gateway :8080"
 
-GATEWAY_PORT=8081 python3 -u /app/service.py &
-flask_pid=$!
+# FLASK_OFF=1 runs go-front ALONE (Flask retirement test / eventual shutdown).
+# With Flask off, the go-front catch-all to :8081 fails for unmigrated routes
+# (= the dead web-UI HTML), but every migrated route (app via Caddy, the Mac
+# daemon's /api/internal/*, HA) is served natively by go-front. Default 0.
+flask_pid=""
+if [ "${FLASK_OFF:-0}" = "1" ]; then
+    echo "[entrypoint] FLASK_OFF=1 — Flask NOT started, go-front only"
+else
+    GATEWAY_PORT=8081 python3 -u /app/service.py &
+    flask_pid=$!
+fi
 
 /app/hls-gateway-go \
     -addr :8080 \
@@ -30,5 +39,5 @@ go_pid=$!
 # Wait for whichever exits first, then take the container down.
 wait -n
 echo "[entrypoint] a child exited (flask=$flask_pid go=$go_pid) — stopping the other + exiting for restart"
-kill "$flask_pid" "$go_pid" 2>/dev/null
+kill $flask_pid "$go_pid" 2>/dev/null
 exit 1
