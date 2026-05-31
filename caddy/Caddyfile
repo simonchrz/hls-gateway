@@ -13,6 +13,15 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 
 	encode zstd gzip
 
+	# Channel live-TV (playlists + segments) -> tv-receiver :9983. Live-TV moved
+	# off Flask; tv-receiver is the sole producer. Slug = lowercase alnum/hyphen,
+	# so _rec_<uuid> (VOD) + .tvd-* (models) fall through to the static rules below.
+	# Must precede @hls_ts. Rollback: delete this block + reload (bak-pre-weblive).
+	@chan_hls path_regexp ^/hls/[a-z0-9][a-z0-9-]*/(index\.m3u8|dvr\.m3u8|seg_[0-9]+\.ts)$
+	handle @chan_hls {
+		reverse_proxy 127.0.0.1:9983
+	}
+
 	# Static HLS segments served directly from SSD (bypasses Flask)
 	@hls_ts path_regexp ^/hls/[^/]+/seg_[0-9]+\.ts$
 	handle @hls_ts {
@@ -39,6 +48,11 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 	# Static recording segments straight from SSD (bypasses Flask) — mirror of @hls_ts.
 	# On disk: /mnt/tv/hls/_rec_<uuid>/seg_NNNNN.ts ; requested as /recording/<uuid>/seg_NNNNN.ts
 	# index.m3u8 deliberately NOT matched — stays on Flask (on-demand packaging + ad markers).
+	# DVR delete button (was Flask) -> tv-receiver native.
+	@rec_delete path_regexp ^/recording/[^/]+/delete$
+	handle @rec_delete {
+		reverse_proxy 127.0.0.1:9983
+	}
 	@rec_ts path_regexp recseg ^/recording/([^/]+)/(seg_[0-9]+\.ts)$
 	handle @rec_ts {
 		rewrite * /hls/_rec_{re.recseg.1}/{re.recseg.2}
@@ -50,6 +64,116 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 	}
 
 	# Everything else → Flask gateway
+	# App live-TV + mediathek passthru -> tv-receiver :9983 (slice-4 cutover).
+	# PERMANENT since slice 5 (2026-05-30): the gateway app-live code was
+	# removed, so deleting these blocks 404s the app. Rollback now = git-revert
+	# hls-gateway 78db6c1 + redeploy, THEN restore Caddyfile.bak-pre-slice4.
+	handle /api/app/live/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /mediathek-passthru/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /mediathek-clip/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	# Mediathek catch-up lookup (event_id -> ARD/ZDF match +hls_url) -> tv-
+	# receiver native. The rip/virtual-recording/autorec machinery this fed on
+	# Flask was retired (dormant since May); this read path is the survivor.
+	handle /api/mediathek-lookup/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	# Watch-player EPG chapter markers -> tv-receiver native /api/events/<slug>
+	# (collapses near-dup events vs Flask). App uses /api/app/live/<slug>/events.
+	handle /api/events/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/epg.json {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/now/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	# Rich app channel listing -> tv-receiver native (rewrite to the app
+	# path so the internal all-slugs /api/channels stays for channel_map).
+	handle /api/channels {
+		rewrite * /api/app/channels
+		reverse_proxy 127.0.0.1:9983
+	}
+	# DVR record/cancel buttons -> tv-receiver native (slug-aware record-
+	# event fixes the same-start-event wrong-channel bug). Flask copies
+	# stay as rollback (remove these blocks + reload).
+	handle /record-event/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /cancel-recording/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /record-series/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /cancel-series/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/internal/scheduled-events {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/is-recording/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+
+	# === go-front -> Caddy migration (2026-06-01): recorder/receiver data
+	# paths routed direct so go-front (:8080) can be retired. Receiver rules
+	# MUST precede the broad /api/internal/* recorder rule (first match wins).
+	# Rollback: delete this block + reload (Caddyfile.bak-pre-gofront).
+	handle /api/internal/live-ads {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/internal/active-channels {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/live-ads/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/live-ads-stream/* {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/warm-status {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/internal/duplicate-recordings {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /api/internal/* {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/learning/* {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/recordings {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/recordings/* {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/recording/* {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/series {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/search {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/poster/* {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /api/bumper/* {
+		reverse_proxy 127.0.0.1:9984
+	}
+	handle /recording/* {
+		reverse_proxy 127.0.0.1:9984
+	}
 	reverse_proxy 127.0.0.1:8080 {
 		header_up Host {host}
 		header_up X-Real-IP {remote_host}
