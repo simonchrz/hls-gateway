@@ -17,3 +17,6 @@ __pycache__/
 # Runtime state (recreated by service)
 state-backup/*
 !state-backup/.gitkeep
+
+# compiled go-front binary (built in-container on Pi)
+go/hls-gateway-go
