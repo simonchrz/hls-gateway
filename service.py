@@ -2207,16 +2207,6 @@ def fetch_epg(window_before=900, window_after=6 * 3600, force=False):
     return out
 
 
-@app.route("/api/epg.json")
-def api_epg_json():
-    try:
-        hours_back = max(0, min(48, int(request.args.get("back", "1"))))
-        hours_fwd  = max(1, min(48, int(request.args.get("fwd",  "12"))))
-    except ValueError:
-        hours_back, hours_fwd = 1, 12
-    data = fetch_epg(window_before=hours_back * 3600,
-                     window_after=hours_fwd * 3600)
-    return Response(json.dumps(data), mimetype="application/json")
 
 
 @app.route("/epg")
@@ -8324,64 +8314,8 @@ def api_poster_show():
     return redirect(_apply_width(img, w), code=302)
 
 
-@app.route("/api/events/<slug>")
-def api_events(slug):
-    """EPG events for a channel within a time window (default: last 2h +
-    next 1h). Used by the watch player to render chapter markers on the
-    scrub bar."""
-    with cmap_lock:
-        info = channel_map.get(slug)
-    if not info:
-        return _cors(Response(json.dumps({"events": []}),
-                               mimetype="application/json"))
-    try:
-        back = max(60, min(24 * 3600, int(request.args.get("back", 7200))))
-        fwd  = max(0,  min(24 * 3600, int(request.args.get("fwd",  3600))))
-    except ValueError:
-        back, fwd = 7200, 3600
-    data = fetch_epg(window_before=back, window_after=fwd)
-    out = []
-    for e in data["events"].get(slug, []):
-        out.append({"start": e["start"], "stop": e["stop"],
-                    "title": e.get("title", "")})
-    return _cors(Response(json.dumps({"events": out, "now": data["now"]}),
-                           mimetype="application/json"))
 
 
-@app.route("/api/now/<slug>")
-def api_now(slug):
-    """Current EPG show for this channel + show-poster. Backward-compat
-    keeps `time` (HH:MM-HH:MM) for the existing Watch-player UI; adds
-    `subtitle`, `start`, `stop`, `poster_url` for the iOS app's live-
-    tile refresh."""
-    with cmap_lock:
-        info = channel_map.get(slug)
-    empty = {"title": None, "subtitle": "", "start": 0, "stop": 0,
-             "time": "", "poster_url": ""}
-    if not info:
-        return _cors(Response(json.dumps(empty),
-                              mimetype="application/json"))
-    now_ts = int(time.time())
-    try:
-        data = fetch_epg(window_before=0, window_after=300)
-        for e in data["events"].get(slug, []):
-            if e["start"] <= now_ts < e["stop"]:
-                title = (e.get("title") or "").strip()
-                tm = (time.strftime("%H:%M", time.localtime(e["start"])) +
-                      "–" +
-                      time.strftime("%H:%M", time.localtime(e["stop"])))
-                return _cors(Response(json.dumps({
-                    "title": title,
-                    "subtitle": (e.get("subtitle") or "").strip(),
-                    "start": e["start"],
-                    "stop": e["stop"],
-                    "time": tm,
-                    "poster_url": _show_poster_url("", title),
-                }), mimetype="application/json"))
-    except Exception:
-        pass
-    return _cors(Response(json.dumps(empty),
-                          mimetype="application/json"))
 
 
 @app.route("/api/recording-window/<slug>")
@@ -8618,70 +8552,8 @@ def api_ready():
 
 
 
-@app.route("/api/internal/scheduled-events")
-def api_internal_scheduled_events():
-    """Lightweight list of DVR entries (scheduled OR currently
-    recording) keyed by EPG event id. Used by /epg's
-    syncScheduledFromUpcoming to refresh the green-dot indicator
-    after schedule actions without a full page reload.
-
-    Two endpoints needed because tvh splits them: grid_upcoming
-    contains future-scheduled entries, grid_recording is the
-    in-progress ones. Without the latter, an actively-recording
-    show loses its green dot the moment it starts."""
-    out = []
-    seen = set()
-    for ep in ("/api/dvr/entry/grid_upcoming",
-               "/api/dvr/entry/grid_recording"):
-        try:
-            data = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}{ep}?limit=500", timeout=5).read())
-            for e in data.get("entries", []):
-                eid = e.get("broadcast")
-                if eid is None:
-                    continue
-                u = e.get("uuid")
-                if u in seen:
-                    continue
-                seen.add(u)
-                out.append({
-                    "eid": eid,
-                    "uuid": u,
-                    "channel": e.get("channel"),
-                    "start": e.get("start"),
-                })
-        except Exception:
-            pass
-    return _cors(Response(json.dumps({"entries": out}),
-                            mimetype="application/json"))
 
 
-@app.route("/record-event/<event_id>")
-def record_event(event_id):
-    """Schedule a DVR entry for a specific EPG event (whole programme).
-    Adds 5 min pre / 10 min post padding so we don't lose the start
-    if the broadcaster runs early or the end if they run long.
-    Witnessed: 'Davina & Shania - We Love Monaco' on RTLZWEI scheduled
-    via this endpoint without padding, broadcast ran ~13 min past EPG
-    end, recording cut off at end. tvh's global default pre/post is
-    0/0 — autorec rules carry their own padding but manual schedules
-    from this endpoint don't inherit anything."""
-    body = urllib.parse.urlencode({
-        "event_id": event_id, "config_uuid": "",
-        "start_extra": 5, "stop_extra": 10,
-    }).encode()
-    req = urllib.request.Request(f"{dvr_base()}/api/dvr/entry/create_by_event",
-                                  data=body, method="POST")
-    try:
-        res = urllib.request.urlopen(req, timeout=10).read().decode()
-        data = json.loads(res)
-        uuid = (data.get("uuid") or [None])[0] \
-            if isinstance(data.get("uuid"), list) else data.get("uuid")
-        return _cors(Response(json.dumps({"ok": True, "uuid": uuid}),
-                               mimetype="application/json"))
-    except Exception as e:
-        return Response(json.dumps({"ok": False, "error": str(e)}),
-                        status=500, mimetype="application/json")
 
 
 # DVB channels where the ARD Mediathek is likely to have coverage.
@@ -8939,217 +8811,8 @@ def api_mediathek_schedule(event_id):
     }), mimetype="application/json"))
 
 
-@app.route("/record-series/<event_id>")
-def record_series(event_id):
-    """Create a tvheadend autorec rule to capture every future airing of
-    this programme on the same channel. Title-regex based because
-    German DVB-C doesn't ship series-link CRIDs."""
-    # Resolve event → title + channel
-    try:
-        ev = json.loads(urllib.request.urlopen(
-            f"{dvr_base()}/api/epg/events/load?eventId={event_id}"
-            + (f"&slug={urllib.parse.quote(request.args.get('slug',''))}"
-               if request.args.get('slug') else ""),
-            timeout=6).read())
-        entry = (ev.get("entries") or [{}])[0]
-        title = entry.get("title")
-        ch_uuid = entry.get("channelUuid")
-        ch_name = entry.get("channelName") or ""
-    except Exception as e:
-        return Response(json.dumps({"ok": False, "error": f"lookup: {e}"}),
-                        status=500, mimetype="application/json")
-    if not title or not ch_uuid:
-        return Response(json.dumps({"ok": False,
-                                     "error": "event not found"}),
-                        status=404, mimetype="application/json")
-    # Anchor the regex so "Tagesschau" doesn't grab "Tagesschau um 5".
-    title_regex = "^" + re.escape(title) + "$"
-    conf = {
-        "enabled": True,
-        "name": f"{title} ({ch_name})",
-        "title": title_regex,
-        "fulltext": False,
-        "channel": ch_uuid,
-        "comment": f"auto via /record-series for eid={event_id}",
-        # Padding (minutes): broadcasters routinely start 1-3 min early
-        # and run 5-10 min long past the EPG-scheduled stop. Tvh's
-        # global pre/post-extra-time isn't applied to autorec-spawned
-        # entries (they freeze 0/0 unless overridden here). 5 min pre /
-        # 10 min post matches what we patched onto the existing rules.
-        "start_extra": 5,
-        "stop_extra": 10,
-        # Cap parallel scheduled entries per series. Without this tvh
-        # schedules every matching airing in the EPG window — Comedy
-        # Central runs South Park 5-10x/day → 54 entries queued from a
-        # single click. 10 keeps a Daily covered for ~1-2 weeks; tvh
-        # auto-schedules the next one as each completes. Override in
-        # the tvh autorec UI if you actually want unlimited (rare).
-        "maxsched": 10,
-    }
-    # Lock to the seed event's time-of-day so a midday rerun on the
-    # same channel doesn't get picked up alongside the prime-time
-    # original. tvheadend autorec uses HH:MM strings and treats
-    # start_window as the upper bound of the acceptable start time
-    # (not a duration). Bracket the seed by -5/+15 min — drift seen
-    # on kabel eins is typically forward (slot fills with promos) but
-    # can be backward by 1-2 min if a preceding programme finishes
-    # early. 20-min total window stays well clear of any rerun slot.
-    #
-    # Exception: when the EPG already shows MULTIPLE same-title same-
-    # channel events today (= classic morning kid-block pattern with
-    # SpongeBob 06:25 + 06:50 + 07:15, or daytime Tröödeltrupp marathons),
-    # skip the time window entirely — the user wants every episode of
-    # the day, not just the one that happened to be the seed slot.
-    # The midnight-rerun concern was for prime-time singletons; not
-    # relevant once tvh sees siblings.
-    seed_start = entry.get("start")
-    if seed_start:
-        siblings = 0
-        try:
-            day_end = seed_start - (seed_start % 86400) + 86400  # end of day
-            params = urllib.parse.urlencode({
-                "limit": 100, "channel": ch_uuid, "title": title})
-            grid = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}/api/epg/events/grid?{params}",
-                timeout=5).read())
-            for ev in grid.get("entries", []):
-                s = ev.get("start", 0)
-                if (s != seed_start and s < day_end
-                        and ev.get("channelUuid") == ch_uuid
-                        and ev.get("title") == title):
-                    siblings += 1
-        except Exception:
-            pass
-        if siblings == 0:
-            lt = time.localtime(seed_start)
-            seed_min = lt.tm_hour * 60 + lt.tm_min
-            start_min = (seed_min - 5) % (24 * 60)
-            end_min = (seed_min + 15) % (24 * 60)
-            conf["start"] = f"{start_min // 60:02d}:{start_min % 60:02d}"
-            conf["start_window"] = f"{end_min // 60:02d}:{end_min % 60:02d}"
-        else:
-            print(f"[record-series] {title}: {siblings} sibling episode(s) "
-                  f"on {ch_name} today — omitting start_window so all get "
-                  f"scheduled", flush=True)
-    # Idempotency check: tvheadend doesn't dedup autorec rules by
-    # (title, channel) — calling /record-series twice on the same show
-    # produces two identical rules, doubling future scheduled entries
-    # (root cause of the SpongeBob 153-instead-of-75 incident
-    # 2026-05-01). Look up existing rules with same regex+channel and
-    # return early if already present.
-    try:
-        existing_grid = json.loads(urllib.request.urlopen(
-            f"{dvr_base()}/api/dvr/autorec/grid?limit=500",
-            timeout=5).read())
-        for er in existing_grid.get("entries", []):
-            if (er.get("title") == title_regex
-                    and er.get("channel") == ch_uuid
-                    and er.get("enabled")):
-                return _cors(Response(json.dumps({
-                    "ok": True, "uuid": er.get("uuid"),
-                    "title": title, "channel": ch_name,
-                    "already_exists": True,
-                    "scheduled": 0,
-                    "tuner_conflicts": [],
-                    "tuner_total": TUNER_TOTAL}),
-                    mimetype="application/json"))
-    except Exception:
-        # Best-effort dedup; on failure we still create — duplicate is
-        # better than failing the user's recording request.
-        pass
-    body = urllib.parse.urlencode({"conf": json.dumps(conf)}).encode()
-    try:
-        req = urllib.request.Request(
-            f"{dvr_base()}/api/dvr/autorec/create",
-            data=body, method="POST")
-        res = urllib.request.urlopen(req, timeout=10).read().decode()
-        data = json.loads(res) if res else {}
-        autorec_uuid = data.get("uuid")
-        # tvheadend schedules matching EPG events asynchronously. Give
-        # it ~2 s then count how many upcoming DVR entries the rule has
-        # spawned so the client can show "N Folgen geplant".
-        scheduled = 0
-        spawned_uuids = set()
-        try:
-            time.sleep(2)
-            up = json.loads(urllib.request.urlopen(
-                f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
-                timeout=10).read())
-            for e in up.get("entries", []):
-                if e.get("autorec") == autorec_uuid:
-                    scheduled += 1
-                    spawned_uuids.add(e.get("uuid"))
-        except Exception:
-            pass
-        # Tuner-conflict report: of the entries the autorec just spawned,
-        # how many overlap with > TUNER_TOTAL unique muxes? Helps the
-        # caller surface a warning ("3 of 5 planned episodes will silently
-        # fail at recording time — same-time conflict with X").
-        conflicts = []
-        try:
-            cmap = _compute_tuner_conflicts(int(time.time()))
-            conflicts = sorted(
-                u for u in spawned_uuids
-                if cmap.get(u, 0) > TUNER_TOTAL)
-        except Exception:
-            pass
-        return _cors(Response(json.dumps({"ok": True,
-                                           "uuid": autorec_uuid,
-                                           "title": title,
-                                           "channel": ch_name,
-                                           "scheduled": scheduled,
-                                           "tuner_conflicts": conflicts,
-                                           "tuner_total": TUNER_TOTAL}),
-                               mimetype="application/json"))
-    except Exception as e:
-        return Response(json.dumps({"ok": False, "error": str(e)}),
-                        status=500, mimetype="application/json")
 
 
-@app.route("/cancel-series/<autorec_uuid>")
-def cancel_series(autorec_uuid):
-    """Delete an autorec rule and cancel every upcoming DVR entry it
-    has spawned. Already-recorded episodes on disk are left alone —
-    the user is explicitly only tearing down the "record future
-    episodes" automation, not their archive."""
-    cancelled = 0
-    try:
-        up = json.loads(urllib.request.urlopen(
-            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=500",
-            timeout=10).read())
-        for e in up.get("entries", []):
-            if e.get("autorec") != autorec_uuid:
-                continue
-            ep_uuid = e.get("uuid")
-            if not ep_uuid:
-                continue
-            body = urllib.parse.urlencode({"uuid": ep_uuid}).encode()
-            for ep in ("/api/dvr/entry/cancel",
-                       "/api/dvr/entry/remove"):
-                try:
-                    urllib.request.urlopen(
-                        urllib.request.Request(
-                            f"{dvr_base()}{ep}",
-                            data=body, method="POST"),
-                        timeout=5).read()
-                    cancelled += 1
-                    break
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    try:
-        body = urllib.parse.urlencode({"uuid": autorec_uuid}).encode()
-        urllib.request.urlopen(
-            urllib.request.Request(f"{dvr_base()}/api/idnode/delete",
-                                    data=body, method="POST"),
-            timeout=10).read()
-    except Exception as e:
-        return Response(json.dumps({"ok": False, "error": str(e)}),
-                        status=500, mimetype="application/json")
-    return _cors(Response(json.dumps({"ok": True,
-                                        "cancelled": cancelled}),
-                           mimetype="application/json"))
 
 
 # --- EPG metadata enrichment via TVmaze (free, no API key) -----
@@ -9574,56 +9237,8 @@ def _cleanup_watched_loop():
         time.sleep(6 * 3600)
 
 
-@app.route("/cancel-recording/<uuid>")
-def cancel_recording(uuid):
-    """Cancel a scheduled (or running) DVR entry, JSON response."""
-    body = urllib.parse.urlencode({"uuid": uuid}).encode()
-    last_err = None
-    for ep in ("/api/dvr/entry/cancel", "/api/dvr/entry/remove"):
-        try:
-            req = urllib.request.Request(f"{dvr_base()}{ep}",
-                                          data=body, method="POST")
-            urllib.request.urlopen(req, timeout=5).read()
-            return _cors(Response(json.dumps({"ok": True}),
-                                   mimetype="application/json"))
-        except Exception as e:
-            last_err = str(e)
-    return Response(json.dumps({"ok": False, "error": last_err}),
-                    status=500, mimetype="application/json")
 
 
-@app.route("/api/is-recording/<slug>")
-def api_is_recording(slug):
-    """Does this channel currently have an active or upcoming recording?"""
-    with cmap_lock:
-        info = channel_map.get(slug)
-    if not info:
-        return _cors(Response(json.dumps({"active": False}),
-                               mimetype="application/json"))
-    ch_uuid = info["uuid"]
-    now_ts = int(time.time())
-    try:
-        data = json.loads(urllib.request.urlopen(
-            f"{dvr_base()}/api/dvr/entry/grid_upcoming?limit=200",
-            timeout=6).read())
-    except Exception:
-        return _cors(Response(json.dumps({"active": False}),
-                               mimetype="application/json"))
-    active = False
-    title = None
-    stop = 0
-    for e in data.get("entries", []):
-        if e.get("channel") != ch_uuid:
-            continue
-        s = e.get("start", 0); st = e.get("stop", 0)
-        if s <= now_ts < st:
-            active = True
-            title = e.get("disp_title", "")
-            stop = st
-            break
-    return _cors(Response(json.dumps({"active": active, "title": title,
-                                        "stop": stop}),
-                           mimetype="application/json"))
 
 
 @app.route("/recordings")
