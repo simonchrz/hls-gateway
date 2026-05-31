@@ -154,6 +154,8 @@ func main() {
 	// filter + flat app schema. /api/recording/<uuid>/* (singular) stays Flask.
 	mux.Handle("GET /api/recordings", recProxy)
 	mux.Handle("GET /api/recordings/{uuid}", recProxy)
+	// slice 6i — per-show aggregated library (Bibliothek tile data) for the app.
+	mux.Handle("GET /api/series", recProxy)
 	// slice 6g — playback-state writers (resume position + watched flag).
 	mux.Handle("POST /api/recording/{uuid}/playposition", recProxy)
 	mux.Handle("POST /api/recording/{uuid}/watched", recProxy)
