@@ -1,43 +1,25 @@
 #!/usr/bin/bash
-# Strangler-fig cutover entrypoint.
+# Pure-Flask entrypoint — go-front (the Go strangler-fig front) RETIRED 2026-06-01.
 #
-# Runs the Go gateway on :8080 (where Caddy points, unchanged) in front of
-# the Flask service.py backend on :8081. The Go gateway serves migrated
-# routes natively and proxies everything else to Flask.
+# Why go-front is gone: Caddy's handle blocks already route every migrated path
+# directly — recorder paths (/api/internal/*, /api/learning/*, /api/recordings,
+# /api/recording/*, /api/series, /api/search, /api/poster/*, /api/bumper/*,
+# /recording/*) → tv-recorder :9984, and live-TV paths (live-ads(-stream),
+# active-channels, warm-status) → tv-receiver :9983 — all BEFORE the catch-all.
+# So go-front's ~60 native routes had become dead duplicates; only the Flask
+# HTML leftovers + /api/internal/duplicate-recordings ever reached :8080. go-front
+# had nothing left to route, so it leaves the data path. Flask now binds :8080
+# itself (where Caddy points, unchanged — no Caddy edit needed for this cutover).
 #
-# Supervises BOTH: if either process exits, this exits non-zero so Docker's
-# restart:unless-stopped recreates the container cleanly (rather than leaving
-# a half-dead gateway — e.g. Go up but Flask crashed). The container
-# healthcheck (:8080/healthz, Go-native) only confirms Go + tv-receiver; Flask
-# liveness is covered here by `wait -n`.
+# /healthz is served by Flask too (byte-faithful to the old go-front native one),
+# so the container healthcheck (:8080/healthz) keeps working.
 #
-# Revert to pure Flask: set the compose `command:` back to
-#   python3 -u /app/service.py
-# and drop GATEWAY_PORT (defaults to 8080).
+# Rollback: restore gateway-entrypoint.sh.bak-pre-stage4 + `docker compose up -d`.
+# The hls-gateway-go binary is still in the image (Dockerfile unchanged), so the
+# old strangler entrypoint works again as-is.
 set -u
 
-echo "[entrypoint] strangler-fig: Flask backend :8081 + Go gateway :8080"
+echo "[entrypoint] pure Flask on :8080 (go-front retired 2026-06-01)"
 
-# FLASK_OFF=1 runs go-front ALONE (Flask retirement test / eventual shutdown).
-# With Flask off, the go-front catch-all to :8081 fails for unmigrated routes
-# (= the dead web-UI HTML), but every migrated route (app via Caddy, the Mac
-# daemon's /api/internal/*, HA) is served natively by go-front. Default 0.
-flask_pid=""
-if [ "${FLASK_OFF:-0}" = "1" ]; then
-    echo "[entrypoint] FLASK_OFF=1 — Flask NOT started, go-front only"
-else
-    GATEWAY_PORT=8081 python3 -u /app/service.py &
-    flask_pid=$!
-fi
-
-/app/hls-gateway-go \
-    -addr :8080 \
-    -flask http://127.0.0.1:8081 \
-    -tv-receiver http://127.0.0.1:9983 &
-go_pid=$!
-
-# Wait for whichever exits first, then take the container down.
-wait -n
-echo "[entrypoint] a child exited (flask=$flask_pid go=$go_pid) — stopping the other + exiting for restart"
-kill $flask_pid "$go_pid" 2>/dev/null
-exit 1
+# GATEWAY_PORT unset → service.py defaults to 8080 (see service.py:17817).
+exec python3 -u /app/service.py
