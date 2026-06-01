@@ -9,6 +9,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
       - /mnt/tv:/mnt/tv:ro
+      - /home/simon/hls-gateway/static:/srv/gw-static:ro
     environment:
       - TZ=Europe/Berlin
 

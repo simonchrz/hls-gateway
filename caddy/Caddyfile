@@ -174,6 +174,21 @@ raspberrypi5lan:8443, raspberrypi5lan.fritz.box:8443, 192.168.178.61:8443 {
 	handle /recording/* {
 		reverse_proxy 127.0.0.1:9984
 	}
+	# Flask shutdown (2026-06-01): the last live Flask deps move to
+	# Caddy/tv-receiver so the hls-gateway container can stop entirely.
+	# Channel logos: static from the host bind mount (was Flask /static/*).
+	handle_path /static/* {
+		root * /srv/gw-static
+		file_server
+	}
+	# Health: HA monitoring reads /healthz; tv-receiver serves it natively.
+	handle /healthz {
+		reverse_proxy 127.0.0.1:9983
+	}
+	handle /api/health {
+		rewrite * /healthz
+		reverse_proxy 127.0.0.1:9983
+	}
 	reverse_proxy 127.0.0.1:8080 {
 		header_up Host {host}
 		header_up X-Real-IP {remote_host}
